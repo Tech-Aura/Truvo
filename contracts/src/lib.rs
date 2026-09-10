@@ -86,6 +86,41 @@ impl TruvoContract {
         };
         env.storage().persistent().set(&key, &task);
     }
+
+    /// Confirm that the worker has completed the task.
+    ///
+    /// - Looks up the task by `task_id`.
+    /// - Reverts if the task does not exist or is not in "Created" status.
+    /// - Requires authorization from the assigned worker.
+    /// - Stores `proof_hash` against the task and updates status to
+    ///   "Confirmed".
+    pub fn confirm_completion(
+        env: Env,
+        task_id: BytesN<32>,
+        proof_hash: BytesN<32>,
+    ) {
+        let key = task_key(&env, &task_id);
+
+        // 1. Load the task – revert if it does not exist.
+        let mut task: TaskData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("task not found");
+
+        // 2. Only the assigned worker may confirm completion.
+        task.worker.require_auth();
+
+        // 3. Task must still be in "Created" status.
+        if task.status != STATUS_CREATED {
+            panic!("task is not in Created status");
+        }
+
+        // 4. Record the proof and mark as confirmed.
+        task.proof_hash = proof_hash;
+        task.status = STATUS_CONFIRMED;
+        env.storage().persistent().set(&key, &task);
+    }
 }
 
 #[cfg(test)]
@@ -106,6 +141,14 @@ mod test {
         BytesN::<32>::from_array(env, &[1u8; 32])
     }
 
+    fn seed_task(env: &Env, contract_addr: &Address, task: &TaskData, task_id: &BytesN<32>) {
+        let key = task_key(env, task_id);
+        env.mock_auths(&[]);
+        env.as_contract(contract_addr, || {
+            env.storage().persistent().set(&key, task);
+        });
+    }
+
     fn read_task(env: &Env, contract_addr: &Address, task_id: &BytesN<32>) -> TaskData {
         let key = task_key(env, task_id);
         env.as_contract(contract_addr, || {
@@ -115,6 +158,10 @@ mod test {
                 .expect("task should exist")
         })
     }
+
+    // ------------------------------------------------------------------
+    // create_task tests
+    // ------------------------------------------------------------------
 
     #[test]
     fn create_task_happy_path() {
@@ -196,6 +243,121 @@ mod test {
             &contract_addr,
             &soroban_sdk::Symbol::new(&env, "create_task"),
             (payer, worker, 1000_i128, task_id, 100_u64).into_val(&env),
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // confirm_completion tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn confirm_completion_happy_path() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let proof = BytesN::<32>::from_array(&env, &[0xABu8; 32]);
+
+        // Seed a task in "Created" status.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount: 1000,
+                deadline: 100,
+                status: STATUS_CREATED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        let args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), proof.clone()).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "confirm_completion",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "confirm_completion"),
+            args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_CONFIRMED);
+        assert_eq!(task.proof_hash, proof);
+    }
+
+    #[test]
+    #[should_panic(expected = "task not found")]
+    fn confirm_completion_rejects_missing_task() {
+        let (env, contract_addr, _payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let proof = BytesN::<32>::from_array(&env, &[0xABu8; 32]);
+
+        let args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), proof.clone()).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "confirm_completion",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "confirm_completion"),
+            args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not in Created status")]
+    fn confirm_completion_rejects_wrong_status() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let proof = BytesN::<32>::from_array(&env, &[0xABu8; 32]);
+
+        // Seed a task already in "Confirmed" status.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount: 1000,
+                deadline: 100,
+                status: STATUS_CONFIRMED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        let args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), proof.clone()).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "confirm_completion",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "confirm_completion"),
+            args,
         );
     }
 }
