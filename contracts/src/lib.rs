@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, Symbol, symbol_short};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, symbol_short};
 
 // ---------------------------------------------------------------------------
 // Storage layout decisions
@@ -159,12 +159,48 @@ impl TruvoContract {
             (task_id, task.worker, task.amount),
         );
     }
+
+    /// Refund the escrowed funds back to the payer if the deadline has passed.
+    ///
+    /// - Looks up the task by `task_id` and verifies it exists.
+    /// - Reverts unless the current ledger timestamp is past the stored
+    ///   `deadline`.
+    /// - Reverts unless status is still "Created" (not confirmed, released,
+    ///   or already refunded).
+    /// - In production, transfers the locked amount from the contract back to
+    ///   the payer via the SEP-41 token contract.
+    /// - Updates status to "Refunded".
+    pub fn refund_if_expired(env: Env, task_id: BytesN<32>) {
+        let key = task_key(&env, &task_id);
+
+        // 1. Load the task.
+        let mut task: TaskData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("task not found");
+
+        // 2. Deadline must have passed.
+        let ledger_timestamp = env.ledger().timestamp();
+        if ledger_timestamp <= task.deadline {
+            panic!("deadline has not passed yet");
+        }
+
+        // 3. Only tasks still in "Created" status are refundable.
+        if task.status != STATUS_CREATED {
+            panic!("task is not refundable in current status");
+        }
+
+        // 4. Mark as refunded and persist.
+        task.status = STATUS_REFUNDED;
+        env.storage().persistent().set(&key, &task);
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+    use soroban_sdk::testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke};
     use soroban_sdk::{IntoVal, Val};
 
     fn setup() -> (Env, Address, Address, Address) {
@@ -479,6 +515,134 @@ mod test {
         env.invoke_contract::<()>(
             &contract_addr,
             &soroban_sdk::Symbol::new(&env, "release_funds"),
+            args,
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // refund_if_expired tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn refund_if_expired_happy_path() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+
+        // Seed a task in "Created" status with deadline in the past.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount: 1000,
+                deadline: 50,
+                status: STATUS_CREATED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        // Advance ledger timestamp past deadline.
+        env.ledger().set_timestamp(100);
+
+        let args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "refund_if_expired",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
+            args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_REFUNDED);
+    }
+
+    #[test]
+    #[should_panic(expected = "deadline has not passed yet")]
+    fn refund_if_expired_rejects_before_deadline() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount: 1000,
+                deadline: 500,
+                status: STATUS_CREATED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        env.ledger().set_timestamp(100);
+
+        let args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "refund_if_expired",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
+            args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not refundable in current status")]
+    fn refund_if_expired_rejects_confirmed_task() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount: 1000,
+                deadline: 50,
+                status: STATUS_CONFIRMED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        env.ledger().set_timestamp(100);
+
+        let args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "refund_if_expired",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
             args,
         );
     }
