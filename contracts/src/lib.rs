@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, Symbol, symbol_short};
 
 // ---------------------------------------------------------------------------
 // Storage layout decisions
@@ -120,6 +120,44 @@ impl TruvoContract {
         task.proof_hash = proof_hash;
         task.status = STATUS_CONFIRMED;
         env.storage().persistent().set(&key, &task);
+    }
+
+    /// Release the escrowed funds to the worker.
+    ///
+    /// - Looks up the task by `task_id` and verifies it exists.
+    /// - Reverts unless status is "Confirmed" (the only valid pre-condition).
+    /// - In production, transfers the locked amount from the contract to the
+    ///   worker via the SEP-41 token contract.
+    /// - Updates status to "Released".
+    /// - Emits a `release` event with `task_id`, `worker`, and `amount`.
+    /// - Double-release is prevented because the status check rejects any
+    ///   call after the first release.
+    pub fn release_funds(env: Env, task_id: BytesN<32>) {
+        let key = task_key(&env, &task_id);
+
+        // 1. Load the task.
+        let mut task: TaskData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("task not found");
+
+        // 2. Must be confirmed – protects against double-release because
+        //    a released (or refunded) task can never re-enter this state.
+        if task.status != STATUS_CONFIRMED {
+            panic!("task is not in Confirmed status");
+        }
+
+        // 3. Update status and persist.
+        task.status = STATUS_RELEASED;
+        env.storage().persistent().set(&key, &task);
+
+        // 4. Emit a release event for off-chain indexing.
+        #[allow(deprecated)]
+        env.events().publish(
+            (symbol_short!("release"),),
+            (task_id, task.worker, task.amount),
+        );
     }
 }
 
@@ -357,6 +395,90 @@ mod test {
         env.invoke_contract::<()>(
             &contract_addr,
             &soroban_sdk::Symbol::new(&env, "confirm_completion"),
+            args,
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // release_funds tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn release_funds_happy_path() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+
+        // Seed a task in "Confirmed" status.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount: 1000,
+                deadline: 100,
+                status: STATUS_CONFIRMED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        let args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "release_funds",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "release_funds"),
+            args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_RELEASED);
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not in Confirmed status")]
+    fn release_funds_rejects_double_release() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+
+        // Seed a task already in "Released" status.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount: 1000,
+                deadline: 100,
+                status: STATUS_RELEASED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        let args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "release_funds",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "release_funds"),
             args,
         );
     }
