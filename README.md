@@ -9,12 +9,75 @@ A payment settlement layer connecting Stellar's agentic payment protocols to Anc
 - **Network**: Stellar Testnet (`https://soroban-testnet.stellar.org`)
 - **Explorer**: [View on Stellar Expert](https://stellar.expert/explorer/testnet/contract/CA2FRXSOJ7ZNL2OZLADGQEC64D72K3BFWPUBCVKQQGDQLSA54IN3G2PF)
 
+### Implemented Features
+
+- [x] Core escrow lifecycle (`create_task`, `confirm_completion`, `release_funds`, `refund_if_expired`)
+- [x] Dispute resolution (`raise_dispute`, `resolve_dispute` via arbitrator)
+- [x] On-chain events for all state transitions (`task_created`, `task_confirmed`, `task_released`, `task_refunded`, `task_disputed`, `task_resolved`)
+- [x] Gas-efficient storage access and compile-time symbols
+- [x] TypeScript SDK scaffolding with typed interfaces
+- [x] Adversarial test suite (reentrancy protection, double-refund prevention)
+
 ## Project Overview
 
 Truvo serves as the payment settlement bridge connecting autonomous AI agent payment rails to Anchor off-ramp infrastructure:
 - **Agentic Payments**: Built on Stellar, enabling autonomous agents to execute micro-transactions, escrow deposits, and scheduled payouts.
 - **Anchor Off-Ramp Settlement**: Direct connectivity to Stellar Anchor rails (SEP-24 / SEP-31 protocols) for off-ramping into local fiat currencies for human recipients.
 - **Trustless & Verifiable**: Soroban smart contracts manage conditional releases, escrow, and settlement verification.
+
+## Task Lifecycle State Machine
+
+The escrow contract enforces a strict state machine for task lifecycle management. The diagram below shows all valid state transitions, including the dispute resolution path added in Session 2.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Created: create_task
+
+    Created --> Confirmed: confirm_completion
+    Created --> Refunded: refund_if_expired
+    Created --> Disputed: raise_dispute
+
+    Confirmed --> Released: release_funds
+    Confirmed --> Disputed: raise_dispute
+
+    Disputed --> Released: resolve_dispute
+    Disputed --> Refunded: resolve_dispute
+
+    Released --> [*]
+    Refunded --> [*]
+
+    note right of Created
+        Task is funded and awaiting
+        worker confirmation or deadline
+    end note
+
+    note right of Disputed
+        Escrow is frozen pending
+        arbitrator resolution
+    end note
+
+    note left of Released
+        Funds released to worker
+        (terminal state)
+    end note
+
+    note left of Refunded
+        Funds returned to payer
+        (terminal state)
+    end note
+```
+
+**State descriptions:**
+
+| State | Description |
+|---|---|
+| **Created** | Task is funded; awaiting worker confirmation or deadline expiry. |
+| **Confirmed** | Worker has submitted proof of completion; funds ready for release. |
+| **Released** | Funds released to worker (terminal). |
+| **Refunded** | Funds returned to payer (terminal). |
+| **Disputed** | Escrow frozen; awaiting arbitrator resolution. |
+
+---
 
 ## Architecture
 
