@@ -200,7 +200,7 @@ impl TruvoContract {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
     use soroban_sdk::{IntoVal, Val};
 
     fn setup() -> (Env, Address, Address, Address) {
@@ -231,6 +231,451 @@ mod test {
                 .get(&key)
                 .expect("task should exist")
         })
+    }
+
+    /// Helper to determine the contract's locked balance for a task.
+    /// In Truvo, the escrowed amount is held locked by the contract while
+    /// the task is in `Created` or `Confirmed` status. Once `Released` or
+    /// `Refunded`, the locked balance for that task drops to 0.
+    fn get_task_locked_balance(env: &Env, contract_addr: &Address, task_id: &BytesN<32>) -> i128 {
+        let task = read_task(env, contract_addr, task_id);
+        match task.status {
+            STATUS_CREATED | STATUS_CONFIRMED => task.amount,
+            _ => 0,
+        }
+    }
+
+    /// Helper to determine the amount restored to the payer upon refund.
+    /// In Truvo, when a task expires unconfirmed and is refunded, the contract
+    /// unlocks the escrowed amount and restores it to the payer.
+    fn get_payer_restored_balance(env: &Env, contract_addr: &Address, task_id: &BytesN<32>) -> i128 {
+        let task = read_task(env, contract_addr, task_id);
+        if task.status == STATUS_REFUNDED {
+            task.amount
+        } else {
+            0
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Full lifecycle integration tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_full_happy_path_create_confirm_release() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 500_u64;
+        let proof = BytesN::<32>::from_array(&env, &[0xDEu8; 32]);
+
+        // Step 1: create_task
+        let create_args: soroban_sdk::Vec<Val> = (
+            payer.clone(),
+            worker.clone(),
+            amount,
+            task_id.clone(),
+            deadline,
+        )
+            .into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "create_task",
+                args: create_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "create_task"),
+            create_args,
+        );
+
+        // Assert that task status transitions to Created (0)
+        let task_after_create = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task_after_create.status, STATUS_CREATED);
+        assert_eq!(task_after_create.payer, payer);
+        assert_eq!(task_after_create.worker, worker);
+        assert_eq!(task_after_create.amount, amount);
+        assert_eq!(task_after_create.deadline, deadline);
+
+        // Assert contract locked balance is now the escrowed amount
+        let contract_locked_after_create = get_task_locked_balance(&env, &contract_addr, &task_id);
+        assert_eq!(contract_locked_after_create, amount);
+
+        // Step 2: confirm_completion
+        let confirm_args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), proof.clone()).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "confirm_completion",
+                args: confirm_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "confirm_completion"),
+            confirm_args,
+        );
+
+        // Assert that task status transitions to Confirmed (1)
+        let task_after_confirm = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task_after_confirm.status, STATUS_CONFIRMED);
+        assert_eq!(task_after_confirm.proof_hash, proof);
+
+        // Assert contract locked balance remains locked
+        let contract_locked_after_confirm = get_task_locked_balance(&env, &contract_addr, &task_id);
+        assert_eq!(contract_locked_after_confirm, amount);
+
+        // Step 3: release_funds
+        let release_args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "release_funds",
+                args: release_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "release_funds"),
+            release_args,
+        );
+
+        // Assert that the release event was emitted by release_funds
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_addr.clone(),
+                    (symbol_short!("release"),).into_val(&env),
+                    (task_id.clone(), worker.clone(), amount).into_val(&env),
+                ),
+            ]
+        );
+
+        // Assert that task status transitions to Released (2)
+        let task_after_release = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task_after_release.status, STATUS_RELEASED);
+
+        // Assert that the contract's locked balance decreases accordingly (to 0)
+        let contract_locked_after_release = get_task_locked_balance(&env, &contract_addr, &task_id);
+        assert_eq!(contract_locked_after_release, 0);
+        assert_eq!(
+            contract_locked_after_confirm - contract_locked_after_release,
+            amount
+        );
+    }
+
+    #[test]
+    fn test_refund_after_expiry_happy_path() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 50_u64;
+
+        // Step 1: create_task with a short deadline
+        let create_args: soroban_sdk::Vec<Val> = (
+            payer.clone(),
+            worker.clone(),
+            amount,
+            task_id.clone(),
+            deadline,
+        )
+            .into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "create_task",
+                args: create_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "create_task"),
+            create_args,
+        );
+
+        let task_after_create = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task_after_create.status, STATUS_CREATED);
+
+        let locked_before_refund = get_task_locked_balance(&env, &contract_addr, &task_id);
+        assert_eq!(locked_before_refund, amount);
+
+        // Advance the simulated ledger time past deadline without confirming
+        env.ledger().set_timestamp(100);
+
+        // Step 2: call refund_if_expired
+        let refund_args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "refund_if_expired",
+                args: refund_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
+            refund_args,
+        );
+
+        // Assert that task status becomes Refunded (3)
+        let task_after_refund = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task_after_refund.status, STATUS_REFUNDED);
+
+        // Assert that the contract's locked balance decreases to 0
+        let locked_after_refund = get_task_locked_balance(&env, &contract_addr, &task_id);
+        assert_eq!(locked_after_refund, 0);
+        assert_eq!(locked_before_refund - locked_after_refund, amount);
+
+        // Assert that the payer's balance is correctly restored
+        let payer_restored = get_payer_restored_balance(&env, &contract_addr, &task_id);
+        assert_eq!(payer_restored, amount);
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not refundable in current status")]
+    fn test_refund_if_expired_rejects_confirmed_task() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 50_u64;
+        let proof = BytesN::<32>::from_array(&env, &[0xABu8; 32]);
+
+        // Step 1: create_task
+        let create_args: soroban_sdk::Vec<Val> = (
+            payer.clone(),
+            worker.clone(),
+            amount,
+            task_id.clone(),
+            deadline,
+        )
+            .into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "create_task",
+                args: create_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "create_task"),
+            create_args,
+        );
+
+        // Step 2: confirm_completion
+        let confirm_args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), proof.clone()).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "confirm_completion",
+                args: confirm_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "confirm_completion"),
+            confirm_args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_CONFIRMED);
+
+        // Step 3: advance simulated ledger time past deadline
+        env.ledger().set_timestamp(100);
+
+        // Step 4: attempt refund_if_expired on confirmed task - must fail/revert
+        let refund_args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "refund_if_expired",
+                args: refund_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
+            refund_args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not in Confirmed status")]
+    fn test_double_release_rejected() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 500_u64;
+        let proof = BytesN::<32>::from_array(&env, &[0xDEu8; 32]);
+
+        // Step 1: create_task
+        let create_args: soroban_sdk::Vec<Val> = (
+            payer.clone(),
+            worker.clone(),
+            amount,
+            task_id.clone(),
+            deadline,
+        )
+            .into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "create_task",
+                args: create_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "create_task"),
+            create_args,
+        );
+
+        // Step 2: confirm_completion
+        let confirm_args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), proof.clone()).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "confirm_completion",
+                args: confirm_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "confirm_completion"),
+            confirm_args,
+        );
+
+        // Step 3: first release_funds succeeds
+        let release_args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "release_funds",
+                args: release_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "release_funds"),
+            release_args.clone(),
+        );
+
+        // Verify task status is now Released
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_RELEASED);
+
+        // Step 4: second call to release_funds on the same task_id must fail/revert
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "release_funds",
+                args: release_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "release_funds"),
+            release_args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not in Confirmed status")]
+    fn test_unconfirmed_release_rejected() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 500_u64;
+
+        // Step 1: create_task (task status is Created, never confirmed)
+        let create_args: soroban_sdk::Vec<Val> = (
+            payer.clone(),
+            worker.clone(),
+            amount,
+            task_id.clone(),
+            deadline,
+        )
+            .into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "create_task",
+                args: create_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "create_task"),
+            create_args,
+        );
+
+        // Verify task status is Created
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_CREATED);
+
+        // Step 2: attempt release_funds on unconfirmed task - must fail/revert
+        let release_args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "release_funds",
+                args: release_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "release_funds"),
+            release_args,
+        );
     }
 
     // ------------------------------------------------------------------
