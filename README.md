@@ -4,9 +4,10 @@ A payment settlement layer connecting Stellar's agentic payment protocols to Anc
 
 ## Status
 
-**In Development**
-
-Truvo is currently in early-stage development. The monorepo scaffold and initial repository layout have been established.
+**Deployed to Testnet** — The core Truvo Soroban escrow smart contract is deployed and operational on the Stellar Testnet:
+- **Contract ID**: `CA2FRXSOJ7ZNL2OZLADGQEC64D72K3BFWPUBCVKQQGDQLSA54IN3G2PF`
+- **Network**: Stellar Testnet (`https://soroban-testnet.stellar.org`)
+- **Explorer**: [View on Stellar Expert](https://stellar.expert/explorer/testnet/contract/CA2FRXSOJ7ZNL2OZLADGQEC64D72K3BFWPUBCVKQQGDQLSA54IN3G2PF)
 
 ## Project Overview
 
