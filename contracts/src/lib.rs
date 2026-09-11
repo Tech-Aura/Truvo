@@ -2065,4 +2065,148 @@ mod test {
             (task_id.clone(), true).into_val(&env),
         );
     }
+
+    // ------------------------------------------------------------------
+    // Dispute-after-confirmation, resolved-for-payer scenario tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_dispute_after_confirmation_resolved_for_payer() {
+        let (env, contract_addr, payer, worker, arbitrator) =
+            setup_with_arbitrator();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 500_u64;
+        let proof = BytesN::<32>::from_array(&env, &[0xBEu8; 32]);
+
+        // Step 1: create_task.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "create_task",
+            &payer,
+            (
+                payer.clone(),
+                worker.clone(),
+                amount,
+                task_id.clone(),
+                deadline,
+            )
+                .into_val(&env),
+        );
+
+        let payer_balance_before =
+            get_payer_restored_balance(&env, &contract_addr, &task_id);
+        assert_eq!(payer_balance_before, 0);
+
+        // Step 2: worker confirms completion.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "confirm_completion",
+            &worker,
+            (task_id.clone(), proof.clone()).into_val(&env),
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_CONFIRMED);
+
+        // Step 3: payer raises a dispute after confirmation.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "raise_dispute",
+            &payer,
+            (task_id.clone(), payer.clone()).into_val(&env),
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_DISPUTED);
+
+        // Step 4: arbitrator resolves the dispute in favor of the payer.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "resolve_dispute",
+            &arbitrator,
+            (task_id.clone(), false).into_val(&env),
+        );
+
+        // Assert the task status became "Refunded".
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_REFUNDED);
+
+        // Assert the payer's balance was correctly restored by the escrowed
+        // amount.
+        let payer_balance_after =
+            get_payer_restored_balance(&env, &contract_addr, &task_id);
+        assert_eq!(payer_balance_after - payer_balance_before, amount);
+
+        // Assert the contract no longer holds the escrowed amount.
+        let locked_after = get_task_locked_balance(&env, &contract_addr, &task_id);
+        assert_eq!(locked_after, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_resolve_dispute_rejected_from_non_arbitrator() {
+        let (env, contract_addr, payer, worker, _arbitrator) =
+            setup_with_arbitrator();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 500_u64;
+        let proof = BytesN::<32>::from_array(&env, &[0xBEu8; 32]);
+
+        // Step 1: create_task.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "create_task",
+            &payer,
+            (
+                payer.clone(),
+                worker.clone(),
+                amount,
+                task_id.clone(),
+                deadline,
+            )
+                .into_val(&env),
+        );
+
+        // Step 2: worker confirms completion.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "confirm_completion",
+            &worker,
+            (task_id.clone(), proof.clone()).into_val(&env),
+        );
+
+        // Step 3: payer raises a dispute.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "raise_dispute",
+            &payer,
+            (task_id.clone(), payer.clone()).into_val(&env),
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_DISPUTED);
+
+        // Step 4: an address that is not the designated arbitrator attempts
+        // to resolve the dispute – the call must be rejected by the
+        // arbitrator-only authorization check.
+        let non_arbitrator = Address::generate(&env);
+        assert_ne!(non_arbitrator, payer);
+        assert_ne!(non_arbitrator, worker);
+
+        invoke_as(
+            &env,
+            &contract_addr,
+            "resolve_dispute",
+            &non_arbitrator,
+            (task_id.clone(), true).into_val(&env),
+        );
+    }
 }
