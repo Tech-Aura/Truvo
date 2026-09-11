@@ -386,12 +386,13 @@ mod test {
 
     /// Helper to determine the contract's locked balance for a task.
     /// In Truvo, the escrowed amount is held locked by the contract while
-    /// the task is in `Created` or `Confirmed` status. Once `Released` or
+    /// the task is in `Created`, `Confirmed`, or `Disputed` status (a dispute
+    /// freezes the escrow but does not unlock it). Once `Released` or
     /// `Refunded`, the locked balance for that task drops to 0.
     fn get_task_locked_balance(env: &Env, contract_addr: &Address, task_id: &BytesN<32>) -> i128 {
         let task = read_task(env, contract_addr, task_id);
         match task.status {
-            STATUS_CREATED | STATUS_CONFIRMED => task.amount,
+            STATUS_CREATED | STATUS_CONFIRMED | STATUS_DISPUTED => task.amount,
             _ => 0,
         }
     }
@@ -511,7 +512,7 @@ mod test {
                 &env,
                 (
                     contract_addr.clone(),
-                    (symbol_short!("release"),).into_val(&env),
+                    (soroban_sdk::Symbol::new(&env, "task_released"),).into_val(&env),
                     (task_id.clone(), worker.clone(), amount).into_val(&env),
                 ),
             ]
@@ -1730,6 +1731,179 @@ mod test {
             &contract_addr,
             &soroban_sdk::Symbol::new(&env, "resolve_dispute"),
             args,
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Dispute-before-confirmation scenario tests
+    // ------------------------------------------------------------------
+
+    /// Invoke a contract function with mocked auth for a single address.
+    /// Used by the dispute scenario tests below to exercise the full
+    /// public-call flow (create -> dispute -> resolve) like a real user.
+    fn invoke_as(
+        env: &Env,
+        contract_addr: &Address,
+        fn_name: &'static str,
+        auth_addr: &Address,
+        args: soroban_sdk::Vec<Val>,
+    ) {
+        env.mock_auths(&[MockAuth {
+            address: auth_addr,
+            invoke: &MockAuthInvoke {
+                contract: contract_addr,
+                fn_name,
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            contract_addr,
+            &soroban_sdk::Symbol::new(env, fn_name),
+            args,
+        );
+    }
+
+    #[test]
+    fn test_dispute_raised_before_confirmation_moves_task_to_disputed() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 500_u64;
+
+        // Step 1: create_task – task starts in "Created" status.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "create_task",
+            &payer,
+            (
+                payer.clone(),
+                worker.clone(),
+                amount,
+                task_id.clone(),
+                deadline,
+            )
+                .into_val(&env),
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_CREATED);
+
+        // Step 2: raise a dispute while the task is still "Created"
+        // (before the worker confirms completion).
+        invoke_as(
+            &env,
+            &contract_addr,
+            "raise_dispute",
+            &payer,
+            (task_id.clone(), payer.clone()).into_val(&env),
+        );
+
+        // Assert the task correctly moved to "Disputed".
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_DISPUTED);
+
+        // Assert the escrowed amount stays locked while disputed.
+        let locked = get_task_locked_balance(&env, &contract_addr, &task_id);
+        assert_eq!(locked, amount);
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not in Confirmed status")]
+    fn test_release_funds_rejected_while_disputed_before_confirmation() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 500_u64;
+
+        // Step 1: create_task.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "create_task",
+            &payer,
+            (
+                payer.clone(),
+                worker.clone(),
+                amount,
+                task_id.clone(),
+                deadline,
+            )
+                .into_val(&env),
+        );
+
+        // Step 2: raise a dispute while the task is still "Created".
+        invoke_as(
+            &env,
+            &contract_addr,
+            "raise_dispute",
+            &payer,
+            (task_id.clone(), payer.clone()).into_val(&env),
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_DISPUTED);
+
+        // Step 3: release_funds must be rejected while the task is disputed.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "release_funds",
+            &worker,
+            (task_id.clone(),).into_val(&env),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not refundable in current status")]
+    fn test_refund_if_expired_rejected_while_disputed_before_confirmation() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 50_u64;
+
+        // Step 1: create_task.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "create_task",
+            &payer,
+            (
+                payer.clone(),
+                worker.clone(),
+                amount,
+                task_id.clone(),
+                deadline,
+            )
+                .into_val(&env),
+        );
+
+        // Step 2: raise a dispute while the task is still "Created".
+        invoke_as(
+            &env,
+            &contract_addr,
+            "raise_dispute",
+            &payer,
+            (task_id.clone(), payer.clone()).into_val(&env),
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_DISPUTED);
+
+        // Step 3: advance past the deadline so refund_if_expired reaches the
+        // status check (a disputed task must not be refundable even though
+        // the deadline has passed).
+        env.ledger().set_timestamp(100);
+
+        // Step 4: refund_if_expired must be rejected while the task is
+        // disputed.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "refund_if_expired",
+            &payer,
+            (task_id.clone(),).into_val(&env),
         );
     }
 }
