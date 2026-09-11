@@ -30,3 +30,4 @@ Thumbs.db
 *.swo
 *~
 
+contracts/test_snapshots/
