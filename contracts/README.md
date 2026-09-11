@@ -201,6 +201,29 @@ stellar contract invoke \
 
 ---
 
+## Gas / Fee Efficiency Tradeoffs
+
+The contract was audited for storage and compute cost efficiency. The following tradeoffs were made:
+
+### Optimizations Applied
+
+| Optimization | Impact | Notes |
+|---|---|---|
+| **`symbol_short!` for arbitrator key** | Saves runtime Symbol hashing | The arbitrator storage key uses a compile-time short symbol (`"arb"`) instead of a runtime `Symbol::new("arbitrator")` call. Event topic symbols (e.g. `"task_created"`) exceed the 9-char limit for `symbol_short!` and remain as runtime calls to preserve backward-compatible event ABI. |
+| **`match` instead of chained `if`** | Fewer branch instructions | `raise_dispute` uses a `match` on the task status, which compiles to a more efficient jump table than two separate equality comparisons. |
+| **Minimal storage I/O** | No redundant reads/writes | Each function reads the task record exactly once and writes it back exactly once. No code path performs redundant storage operations. |
+| **Removed unnecessary clones** | Fewer heap allocations | Removed redundant `.clone()` calls on `Address` and `BytesN<32>` values that were only used as event arguments (Soroban's publish takes ownership). |
+
+### Tradeoffs
+
+- **Arbitrator read on every `resolve_dispute`**: The arbitrator address is loaded from persistent storage on each call. Caching in a static is not possible in Soroban's WASM execution model (no mutable globals across invocations). This is the correct tradeoff: one extra storage read per dispute resolution is negligible vs. the security benefit of always verifying the on-chain arbitrator.
+
+- **Event topic symbols**: The `symbol_short!` macro only supports symbols up to 9 characters. Event names like `"task_created"` (12 chars) cannot use it without changing the on-chain event ABI, which would break off-chain indexers and SDK consumers. The gas savings do not justify an ABI-breaking change.
+
+- **`task_key` allocation**: The `task_key` helper allocates a new `Bytes` per call. This is the standard Soroban pattern and cannot be avoided without unsafe code.
+
+---
+
 ## Running Tests Locally
 
 To run the full suite of unit and integration tests:
