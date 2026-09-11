@@ -247,6 +247,70 @@ impl TruvoContract {
         task.status = STATUS_DISPUTED;
         env.storage().persistent().set(&key, &task);
     }
+
+    /// Initialize the contract with an arbitrator address.
+    ///
+    /// - Must be called exactly once before any disputes can be resolved.
+    /// - The arbitrator is the sole authority for resolving disputes.
+    /// - Once set, the arbitrator address cannot be changed.
+    /// - The caller of this function must authorize the call.
+    pub fn initialize(env: Env, caller: Address, arbitrator: Address) {
+        // 1. Require authorization from the caller.
+        caller.require_auth();
+
+        // 2. Ensure the contract hasn't already been initialized.
+        let key = soroban_sdk::Symbol::new(&env, "arbitrator");
+        if env.storage().persistent().has(&key) {
+            panic!("contract already initialized");
+        }
+
+        // 3. Store the arbitrator address.
+        env.storage().persistent().set(&key, &arbitrator);
+    }
+
+    /// Resolve a dispute in favor of either the worker or the payer.
+    ///
+    /// - Only the designated arbitrator may call this function.
+    /// - The arbitrator address is set at contract initialization via
+    ///   `initialize` and stored in persistent contract storage.
+    /// - If `favor_worker` is true, the task status is set to "Released"
+    ///   (funds go to the worker). If false, the task status is set to
+    ///   "Refunded" (funds go back to the payer).
+    /// - The task must be in "Disputed" status. Once resolved, the status
+    ///   changes to "Released" or "Refunded", preventing re-resolution.
+    pub fn resolve_dispute(env: Env, task_id: BytesN<32>, favor_worker: bool) {
+        // 1. Load the arbitrator address from storage.
+        let arbitrator_key = soroban_sdk::Symbol::new(&env, "arbitrator");
+        let arbitrator: Address = env
+            .storage()
+            .persistent()
+            .get(&arbitrator_key)
+            .expect("contract not initialized");
+
+        // 2. Only the arbitrator may resolve disputes.
+        arbitrator.require_auth();
+
+        // 3. Load the task – revert if it does not exist.
+        let key = task_key(&env, &task_id);
+        let mut task: TaskData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("task not found");
+
+        // 4. Task must be in "Disputed" status.
+        if task.status != STATUS_DISPUTED {
+            panic!("task is not in Disputed status");
+        }
+
+        // 5. Resolve the dispute and update status.
+        if favor_worker {
+            task.status = STATUS_RELEASED;
+        } else {
+            task.status = STATUS_REFUNDED;
+        }
+        env.storage().persistent().set(&key, &task);
+    }
 }
 
 #[cfg(test)]
@@ -930,6 +994,261 @@ mod test {
         env.invoke_contract::<()>(
             &contract_addr,
             &soroban_sdk::Symbol::new(&env, "raise_dispute"),
+            args,
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // initialize tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn initialize_happy_path() {
+        let (env, contract_addr, payer, _worker) = setup();
+        let arbitrator = Address::generate(&env);
+
+        let args: soroban_sdk::Vec<Val> =
+            (payer.clone(), arbitrator.clone()).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "initialize",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "initialize"),
+            args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "contract already initialized")]
+    fn initialize_rejects_double_init() {
+        let (env, contract_addr, payer, _worker) = setup();
+        let arbitrator = Address::generate(&env);
+
+        let args: soroban_sdk::Vec<Val> =
+            (payer.clone(), arbitrator.clone()).into_val(&env);
+
+        // First init succeeds.
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "initialize",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "initialize"),
+            args.clone(),
+        );
+
+        // Second init should panic.
+        let arbitrator2 = Address::generate(&env);
+        let args2: soroban_sdk::Vec<Val> =
+            (payer.clone(), arbitrator2).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "initialize",
+                args: args2.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "initialize"),
+            args2,
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // resolve_dispute tests
+    // ------------------------------------------------------------------
+
+    fn setup_with_arbitrator() -> (Env, Address, Address, Address, Address) {
+        let (env, contract_addr, payer, worker) = setup();
+        let arbitrator = Address::generate(&env);
+
+        // Initialize the contract with the arbitrator.
+        let args: soroban_sdk::Vec<Val> =
+            (payer.clone(), arbitrator.clone()).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "initialize",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "initialize"),
+            args,
+        );
+
+        (env, contract_addr, payer, worker, arbitrator)
+    }
+
+    #[test]
+    fn resolve_dispute_favor_worker() {
+        let (env, contract_addr, _payer, _worker, arbitrator) =
+            setup_with_arbitrator();
+        let task_id = sample_task_id(&env);
+
+        // Seed a task in "Disputed" status.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: Address::generate(&env),
+                worker: Address::generate(&env),
+                amount: 1000,
+                deadline: 100,
+                status: STATUS_DISPUTED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        let args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), true).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &arbitrator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "resolve_dispute",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "resolve_dispute"),
+            args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_RELEASED);
+    }
+
+    #[test]
+    fn resolve_dispute_favor_payer() {
+        let (env, contract_addr, _payer, _worker, arbitrator) =
+            setup_with_arbitrator();
+        let task_id = sample_task_id(&env);
+
+        // Seed a task in "Disputed" status.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: Address::generate(&env),
+                worker: Address::generate(&env),
+                amount: 1000,
+                deadline: 100,
+                status: STATUS_DISPUTED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        let args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), false).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &arbitrator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "resolve_dispute",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "resolve_dispute"),
+            args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_REFUNDED);
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not in Disputed status")]
+    fn resolve_dispute_rejects_already_resolved() {
+        let (env, contract_addr, _payer, _worker, arbitrator) =
+            setup_with_arbitrator();
+        let task_id = sample_task_id(&env);
+
+        // Seed a task already in "Released" status (already resolved).
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: Address::generate(&env),
+                worker: Address::generate(&env),
+                amount: 1000,
+                deadline: 100,
+                status: STATUS_RELEASED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        let args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), true).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &arbitrator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "resolve_dispute",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "resolve_dispute"),
+            args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "task not found")]
+    fn resolve_dispute_rejects_missing_task() {
+        let (env, contract_addr, _payer, _worker, arbitrator) =
+            setup_with_arbitrator();
+        let task_id = sample_task_id(&env);
+
+        let args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), true).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &arbitrator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "resolve_dispute",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "resolve_dispute"),
             args,
         );
     }
