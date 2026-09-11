@@ -1244,6 +1244,172 @@ mod test {
     }
 
     // ------------------------------------------------------------------
+    // Double-refund protection tests
+    // ------------------------------------------------------------------
+    // Verifies that refund_if_expired can only be called once per task, and
+    // that the two unwind paths (direct refund vs. dispute-resolved refund)
+    // cannot be chained to drain funds twice.
+    // ------------------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "task is not refundable in current status")]
+    fn test_double_refund_rejected() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 50_u64;
+
+        // Seed a task in "Created" status with deadline in the past.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount,
+                deadline,
+                status: STATUS_CREATED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        // Advance ledger timestamp past deadline.
+        env.ledger().set_timestamp(100);
+
+        // First refund_if_expired succeeds
+        let args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "refund_if_expired",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
+            args.clone(),
+        );
+
+        // Verify the task is now Refunded
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_REFUNDED);
+        assert_eq!(task.amount, amount);
+
+        // Second refund_if_expired on the same task_id must fail/revert.
+        // The status check (must be "Created") prevents double-refund.
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "refund_if_expired",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
+            args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not refundable in current status")]
+    fn test_refund_after_dispute_resolution_rejected() {
+        let (env, contract_addr, payer, worker, arbitrator) =
+            setup_with_arbitrator();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 50_u64;
+
+        // Seed a task in "Created" status (expired, before worker confirmed).
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount,
+                deadline,
+                status: STATUS_CREATED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        // Advance ledger timestamp past deadline.
+        env.ledger().set_timestamp(100);
+
+        // --- Path 1: Raise a dispute before refunding ---
+        let dispute_args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), payer.clone()).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "raise_dispute",
+                args: dispute_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "raise_dispute"),
+            dispute_args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_DISPUTED);
+
+        // --- Path 2: Arbitrator resolves in favor of payer (refund) ---
+        let resolve_args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), false).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &arbitrator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "resolve_dispute",
+                args: resolve_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "resolve_dispute"),
+            resolve_args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_REFUNDED);
+        assert_eq!(task.amount, amount);
+
+        // --- Attempt refund_if_expired after dispute-resolved refund ---
+        // This must fail: the task is now Refunded (not Created), so the
+        // status check prevents the direct-refund path from also executing.
+        // This verifies the two unwind paths cannot be chained to drain
+        // funds twice.
+        let refund_args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "refund_if_expired",
+                args: refund_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
+            refund_args,
+        );
+    }
+
+    // ------------------------------------------------------------------
     // raise_dispute tests
     // ------------------------------------------------------------------
 
