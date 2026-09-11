@@ -27,6 +27,7 @@ const STATUS_CREATED: u32 = 0;
 const STATUS_CONFIRMED: u32 = 1;
 const STATUS_RELEASED: u32 = 2;
 const STATUS_REFUNDED: u32 = 3;
+const STATUS_DISPUTED: u32 = 4;
 
 #[derive(Clone)]
 #[contracttype]
@@ -193,6 +194,57 @@ impl TruvoContract {
 
         // 4. Mark as refunded and persist.
         task.status = STATUS_REFUNDED;
+        env.storage().persistent().set(&key, &task);
+    }
+
+    /// Raise a dispute on a task.
+    ///
+    /// - Either the payer or the worker may raise a dispute. Both parties
+    ///   have a legitimate interest in flagging problems with the task.
+    /// - A dispute may be raised while the task is in "Created" status
+    ///   (before the worker confirms completion) or in "Confirmed" status
+    ///   (after confirmation but before funds are released).
+    /// - A dispute cannot be raised on tasks that are already terminal
+    ///   ("Released", "Refunded") or already "Disputed".
+    /// - Moves the task to "Disputed" status, which blocks further
+    ///   release_funds or refund_if_expired calls until the dispute is
+    ///   resolved by an arbitrator.
+    ///
+    /// The `caller` parameter must be the address of the payer or the
+    /// worker. Soroban's `require_auth` verifies that this address
+    /// actually signed the invocation, so passing an arbitrary address
+    /// will fail.
+    pub fn raise_dispute(env: Env, task_id: BytesN<32>, caller: Address) {
+        let key = task_key(&env, &task_id);
+
+        // 1. Verify the caller is authorized.
+        //    In Soroban, require_auth ensures the address actually signed
+        //    the transaction, so this is safe even though caller is
+        //    user-supplied.
+        caller.require_auth();
+
+        // 2. Load the task – revert if it does not exist.
+        let mut task: TaskData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("task not found");
+
+        // 3. Only the payer or the worker may raise a dispute.
+        if caller != task.payer && caller != task.worker {
+            panic!("only payer or worker can raise dispute");
+        }
+
+        // 4. Disputes may only be raised while the task is "Created" or
+        //    "Confirmed". Once the task reaches a terminal state ("Released"
+        //    or "Refunded") or is already "Disputed", no further dispute
+        //    can be raised.
+        if task.status != STATUS_CREATED && task.status != STATUS_CONFIRMED {
+            panic!("dispute cannot be raised in current status");
+        }
+
+        // 5. Move to "Disputed" status and persist.
+        task.status = STATUS_DISPUTED;
         env.storage().persistent().set(&key, &task);
     }
 }
@@ -643,6 +695,241 @@ mod test {
         env.invoke_contract::<()>(
             &contract_addr,
             &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
+            args,
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // raise_dispute tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn raise_dispute_happy_path_created() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+
+        // Seed a task in "Created" status.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount: 1000,
+                deadline: 100,
+                status: STATUS_CREATED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        let args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), payer.clone()).into_val(&env);
+
+        // Payer raises the dispute.
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "raise_dispute",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "raise_dispute"),
+            args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_DISPUTED);
+    }
+
+    #[test]
+    fn raise_dispute_happy_path_confirmed() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+
+        // Seed a task in "Confirmed" status.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount: 1000,
+                deadline: 100,
+                status: STATUS_CONFIRMED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        let args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), worker.clone()).into_val(&env);
+
+        // Worker raises the dispute.
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "raise_dispute",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "raise_dispute"),
+            args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_DISPUTED);
+    }
+
+    #[test]
+    #[should_panic(expected = "task not found")]
+    fn raise_dispute_rejects_missing_task() {
+        let (env, contract_addr, _payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+
+        let args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), worker.clone()).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "raise_dispute",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "raise_dispute"),
+            args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "dispute cannot be raised in current status")]
+    fn raise_dispute_rejects_already_released() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+
+        // Seed a task in "Released" status.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount: 1000,
+                deadline: 100,
+                status: STATUS_RELEASED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        let args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), payer.clone()).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "raise_dispute",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "raise_dispute"),
+            args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "dispute cannot be raised in current status")]
+    fn raise_dispute_rejects_already_refunded() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+
+        // Seed a task in "Refunded" status.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount: 1000,
+                deadline: 100,
+                status: STATUS_REFUNDED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        let args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), payer.clone()).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "raise_dispute",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "raise_dispute"),
+            args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "dispute cannot be raised in current status")]
+    fn raise_dispute_rejects_already_disputed() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+
+        // Seed a task already in "Disputed" status.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount: 1000,
+                deadline: 100,
+                status: STATUS_DISPUTED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        let args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), worker.clone()).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "raise_dispute",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "raise_dispute"),
             args,
         );
     }
