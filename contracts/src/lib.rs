@@ -409,6 +409,19 @@ mod test {
         }
     }
 
+    /// Helper to determine the amount paid out to the worker upon release.
+    /// In Truvo, when a task is released (either via `release_funds` or via a
+    /// dispute resolved in the worker's favor), the contract unlocks the
+    /// escrowed amount and credits it to the worker.
+    fn get_worker_received_balance(env: &Env, contract_addr: &Address, task_id: &BytesN<32>) -> i128 {
+        let task = read_task(env, contract_addr, task_id);
+        if task.status == STATUS_RELEASED {
+            task.amount
+        } else {
+            0
+        }
+    }
+
     // ------------------------------------------------------------------
     // Full lifecycle integration tests
     // ------------------------------------------------------------------
@@ -1904,6 +1917,152 @@ mod test {
             "refund_if_expired",
             &payer,
             (task_id.clone(),).into_val(&env),
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Dispute-after-confirmation, resolved-for-worker scenario tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_dispute_after_confirmation_resolved_for_worker() {
+        let (env, contract_addr, payer, worker, arbitrator) =
+            setup_with_arbitrator();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 500_u64;
+        let proof = BytesN::<32>::from_array(&env, &[0xBEu8; 32]);
+
+        // Step 1: create_task.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "create_task",
+            &payer,
+            (
+                payer.clone(),
+                worker.clone(),
+                amount,
+                task_id.clone(),
+                deadline,
+            )
+                .into_val(&env),
+        );
+
+        let worker_balance_before =
+            get_worker_received_balance(&env, &contract_addr, &task_id);
+        assert_eq!(worker_balance_before, 0);
+
+        // Step 2: worker confirms completion.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "confirm_completion",
+            &worker,
+            (task_id.clone(), proof.clone()).into_val(&env),
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_CONFIRMED);
+
+        // Step 3: payer raises a dispute after confirmation.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "raise_dispute",
+            &payer,
+            (task_id.clone(), payer.clone()).into_val(&env),
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_DISPUTED);
+
+        // Step 4: arbitrator resolves the dispute in favor of the worker.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "resolve_dispute",
+            &arbitrator,
+            (task_id.clone(), true).into_val(&env),
+        );
+
+        // Assert the worker's balance increased by the escrowed amount.
+        let worker_balance_after =
+            get_worker_received_balance(&env, &contract_addr, &task_id);
+        assert_eq!(
+            worker_balance_after - worker_balance_before,
+            amount
+        );
+
+        // Assert the task status became "Released".
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_RELEASED);
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not in Disputed status")]
+    fn test_resolve_dispute_rejected_again_after_resolution() {
+        let (env, contract_addr, payer, worker, arbitrator) =
+            setup_with_arbitrator();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 500_u64;
+        let proof = BytesN::<32>::from_array(&env, &[0xBEu8; 32]);
+
+        // Step 1: create_task.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "create_task",
+            &payer,
+            (
+                payer.clone(),
+                worker.clone(),
+                amount,
+                task_id.clone(),
+                deadline,
+            )
+                .into_val(&env),
+        );
+
+        // Step 2: worker confirms completion.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "confirm_completion",
+            &worker,
+            (task_id.clone(), proof.clone()).into_val(&env),
+        );
+
+        // Step 3: payer raises a dispute after confirmation.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "raise_dispute",
+            &payer,
+            (task_id.clone(), payer.clone()).into_val(&env),
+        );
+
+        // Step 4: arbitrator resolves the dispute in favor of the worker.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "resolve_dispute",
+            &arbitrator,
+            (task_id.clone(), true).into_val(&env),
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_RELEASED);
+
+        // Step 5: a second resolve_dispute call on the same task must be
+        // rejected now that the task is no longer in "Disputed" status.
+        invoke_as(
+            &env,
+            &contract_addr,
+            "resolve_dispute",
+            &arbitrator,
+            (task_id.clone(), true).into_val(&env),
         );
     }
 }
