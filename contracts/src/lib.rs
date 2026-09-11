@@ -245,6 +245,18 @@ mod test {
         }
     }
 
+    /// Helper to determine the amount restored to the payer upon refund.
+    /// In Truvo, when a task expires unconfirmed and is refunded, the contract
+    /// unlocks the escrowed amount and restores it to the payer.
+    fn get_payer_restored_balance(env: &Env, contract_addr: &Address, task_id: &BytesN<32>) -> i128 {
+        let task = read_task(env, contract_addr, task_id);
+        if task.status == STATUS_REFUNDED {
+            task.amount
+        } else {
+            0
+        }
+    }
+
     // ------------------------------------------------------------------
     // Full lifecycle integration tests
     // ------------------------------------------------------------------
@@ -364,6 +376,157 @@ mod test {
         assert_eq!(
             contract_locked_after_confirm - contract_locked_after_release,
             amount
+        );
+    }
+
+    #[test]
+    fn test_refund_after_expiry_happy_path() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 50_u64;
+
+        // Step 1: create_task with a short deadline
+        let create_args: soroban_sdk::Vec<Val> = (
+            payer.clone(),
+            worker.clone(),
+            amount,
+            task_id.clone(),
+            deadline,
+        )
+            .into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "create_task",
+                args: create_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "create_task"),
+            create_args,
+        );
+
+        let task_after_create = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task_after_create.status, STATUS_CREATED);
+
+        let locked_before_refund = get_task_locked_balance(&env, &contract_addr, &task_id);
+        assert_eq!(locked_before_refund, amount);
+
+        // Advance the simulated ledger time past deadline without confirming
+        env.ledger().set_timestamp(100);
+
+        // Step 2: call refund_if_expired
+        let refund_args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "refund_if_expired",
+                args: refund_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
+            refund_args,
+        );
+
+        // Assert that task status becomes Refunded (3)
+        let task_after_refund = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task_after_refund.status, STATUS_REFUNDED);
+
+        // Assert that the contract's locked balance decreases to 0
+        let locked_after_refund = get_task_locked_balance(&env, &contract_addr, &task_id);
+        assert_eq!(locked_after_refund, 0);
+        assert_eq!(locked_before_refund - locked_after_refund, amount);
+
+        // Assert that the payer's balance is correctly restored
+        let payer_restored = get_payer_restored_balance(&env, &contract_addr, &task_id);
+        assert_eq!(payer_restored, amount);
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not refundable in current status")]
+    fn test_refund_if_expired_rejects_confirmed_task() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 50_u64;
+        let proof = BytesN::<32>::from_array(&env, &[0xABu8; 32]);
+
+        // Step 1: create_task
+        let create_args: soroban_sdk::Vec<Val> = (
+            payer.clone(),
+            worker.clone(),
+            amount,
+            task_id.clone(),
+            deadline,
+        )
+            .into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "create_task",
+                args: create_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "create_task"),
+            create_args,
+        );
+
+        // Step 2: confirm_completion
+        let confirm_args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), proof.clone()).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "confirm_completion",
+                args: confirm_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "confirm_completion"),
+            confirm_args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_CONFIRMED);
+
+        // Step 3: advance simulated ledger time past deadline
+        env.ledger().set_timestamp(100);
+
+        // Step 4: attempt refund_if_expired on confirmed task - must fail/revert
+        let refund_args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "refund_if_expired",
+                args: refund_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
+            refund_args,
         );
     }
 
