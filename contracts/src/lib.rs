@@ -1258,6 +1258,172 @@ mod test {
     }
 
     // ------------------------------------------------------------------
+    // Double-refund protection tests
+    // ------------------------------------------------------------------
+    // Verifies that refund_if_expired can only be called once per task, and
+    // that the two unwind paths (direct refund vs. dispute-resolved refund)
+    // cannot be chained to drain funds twice.
+    // ------------------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "task is not refundable in current status")]
+    fn test_double_refund_rejected() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 50_u64;
+
+        // Seed a task in "Created" status with deadline in the past.
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount,
+                deadline,
+                status: STATUS_CREATED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        // Advance ledger timestamp past deadline.
+        env.ledger().set_timestamp(100);
+
+        // First refund_if_expired succeeds
+        let args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "refund_if_expired",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
+            args.clone(),
+        );
+
+        // Verify the task is now Refunded
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_REFUNDED);
+        assert_eq!(task.amount, amount);
+
+        // Second refund_if_expired on the same task_id must fail/revert.
+        // The status check (must be "Created") prevents double-refund.
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "refund_if_expired",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
+            args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not refundable in current status")]
+    fn test_refund_after_dispute_resolution_rejected() {
+        let (env, contract_addr, payer, worker, arbitrator) =
+            setup_with_arbitrator();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 50_u64;
+
+        // Seed a task in "Created" status (expired, before worker confirmed).
+        seed_task(
+            &env,
+            &contract_addr,
+            &TaskData {
+                payer: payer.clone(),
+                worker: worker.clone(),
+                amount,
+                deadline,
+                status: STATUS_CREATED,
+                proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
+            },
+            &task_id,
+        );
+
+        // Advance ledger timestamp past deadline.
+        env.ledger().set_timestamp(100);
+
+        // --- Path 1: Raise a dispute before refunding ---
+        let dispute_args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), payer.clone()).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "raise_dispute",
+                args: dispute_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "raise_dispute"),
+            dispute_args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_DISPUTED);
+
+        // --- Path 2: Arbitrator resolves in favor of payer (refund) ---
+        let resolve_args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), false).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &arbitrator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "resolve_dispute",
+                args: resolve_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "resolve_dispute"),
+            resolve_args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_REFUNDED);
+        assert_eq!(task.amount, amount);
+
+        // --- Attempt refund_if_expired after dispute-resolved refund ---
+        // This must fail: the task is now Refunded (not Created), so the
+        // status check prevents the direct-refund path from also executing.
+        // This verifies the two unwind paths cannot be chained to drain
+        // funds twice.
+        let refund_args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "refund_if_expired",
+                args: refund_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "refund_if_expired"),
+            refund_args,
+        );
+    }
+
+    // ------------------------------------------------------------------
     // raise_dispute tests
     // ------------------------------------------------------------------
 
@@ -1490,6 +1656,309 @@ mod test {
             &soroban_sdk::Symbol::new(&env, "raise_dispute"),
             args,
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Reentrancy protection tests for release_funds
+    // ------------------------------------------------------------------
+    // Soroban's execution model provides structural reentrancy protection:
+    // - Contracts execute in single-threaded WASM with no async callbacks.
+    // - During a transaction, each contract call completes fully before the next.
+    // - There is no mechanism for a receiving contract to call back into the
+    //   escrow contract mid-execution (no fallback hooks, no token callbacks).
+    // - Each top-level invocation is atomic: either all state changes commit or
+    //   none do. A reentrant call within the same transaction would see stale
+    //   or mid-execution state, which Soroban's VM does not permit.
+    //
+    // The following tests verify that the contract's explicit status checks
+    // ("Confirmed" guard in release_funds) prevent double-release or state
+    // corruption, even if an attacker somehow bypassed the VM-level isolation.
+    // This documents the defense-in-depth rather than assuming the VM alone
+    // is sufficient.
+    // ------------------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "task is not in Confirmed status")]
+    fn reentrancy_double_release_attempt() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 500_u64;
+        let proof = BytesN::<32>::from_array(&env, &[0xDEu8; 32]);
+
+        // Setup: create_task -> confirm_completion
+        let create_args: soroban_sdk::Vec<Val> = (
+            payer.clone(),
+            worker.clone(),
+            amount,
+            task_id.clone(),
+            deadline,
+        )
+            .into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "create_task",
+                args: create_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "create_task"),
+            create_args,
+        );
+
+        let confirm_args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), proof.clone()).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "confirm_completion",
+                args: confirm_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "confirm_completion"),
+            confirm_args,
+        );
+
+        // First release succeeds
+        let release_args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "release_funds",
+                args: release_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "release_funds"),
+            release_args.clone(),
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_RELEASED);
+
+        // Simulated reentrant call: attempt release_funds again on the same task.
+        // In a real reentrancy attack, the attacker's contract would try to call
+        // release_funds a second time while the first is still executing. Soroban
+        // does not allow this at the VM level, but even if it did, the status
+        // check (must be "Confirmed") would reject the call since status is now
+        // "Released".
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "release_funds",
+                args: release_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "release_funds"),
+            release_args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "task is not in Created status")]
+    fn reentrancy_confirm_completion_during_release() {
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 500_u64;
+        let proof = BytesN::<32>::from_array(&env, &[0xDEu8; 32]);
+
+        // Setup: create_task -> confirm_completion
+        let create_args: soroban_sdk::Vec<Val> = (
+            payer.clone(),
+            worker.clone(),
+            amount,
+            task_id.clone(),
+            deadline,
+        )
+            .into_val(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "create_task",
+                args: create_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "create_task"),
+            create_args,
+        );
+
+        let confirm_args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), proof.clone()).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "confirm_completion",
+                args: confirm_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "confirm_completion"),
+            confirm_args,
+        );
+
+        // Release funds (moves status to Released)
+        let release_args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "release_funds",
+                args: release_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "release_funds"),
+            release_args,
+        );
+
+        // Simulated reentrant call: try to call confirm_completion after release.
+        // In a reentrancy scenario, the attacker's callback would try to re-confirm
+        // to trigger another release. This is blocked because confirm_completion
+        // requires status == Created, but status is now Released.
+        let confirm_args2: soroban_sdk::Vec<Val> =
+            (task_id.clone(), proof.clone()).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "confirm_completion",
+                args: confirm_args2.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "confirm_completion"),
+            confirm_args2,
+        );
+    }
+
+    #[test]
+    fn reentrancy_vm_guarantee_documented() {
+        // This test explicitly documents Soroban's structural reentrancy protection.
+        // Unlike EVM-style blockchains where reentrancy is a real attack vector
+        // (e.g., The DAO hack), Soroban's WASM execution model provides the
+        // following guarantees:
+        //
+        // 1. Contract calls are synchronous and sequential within a transaction.
+        // 2. There is no callback mechanism (no onReceive, no fallback functions).
+        // 3. A contract cannot call another contract that calls back into the
+        //    original contract during the same transaction.
+        // 4. Each contract invocation sees a consistent, atomic view of state.
+        //
+        // The status-based guards in release_funds (must be "Confirmed") provide
+        // defense-in-depth: even if a future VM change somehow allowed reentrancy,
+        // the explicit status checks would still prevent double-release.
+        //
+        // This test verifies the complete lifecycle where state transitions are
+        // strictly enforced at each step.
+        let (env, contract_addr, payer, worker) = setup();
+        let task_id = sample_task_id(&env);
+        let amount = 1000_i128;
+        let deadline = 500_u64;
+        let proof = BytesN::<32>::from_array(&env, &[0xDEu8; 32]);
+
+        // Create task
+        let create_args: soroban_sdk::Vec<Val> = (
+            payer.clone(),
+            worker.clone(),
+            amount,
+            task_id.clone(),
+            deadline,
+        )
+            .into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "create_task",
+                args: create_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "create_task"),
+            create_args,
+        );
+
+        // Verify status transitions: Created -> Confirmed
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_CREATED);
+        assert_eq!(task.amount, amount);
+
+        // Confirm completion
+        let confirm_args: soroban_sdk::Vec<Val> =
+            (task_id.clone(), proof.clone()).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "confirm_completion",
+                args: confirm_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "confirm_completion"),
+            confirm_args,
+        );
+
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_CONFIRMED);
+
+        // Release funds
+        let release_args: soroban_sdk::Vec<Val> = (task_id.clone(),).into_val(&env);
+        env.mock_auths(&[MockAuth {
+            address: &worker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_addr,
+                fn_name: "release_funds",
+                args: release_args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        env.invoke_contract::<()>(
+            &contract_addr,
+            &soroban_sdk::Symbol::new(&env, "release_funds"),
+            release_args,
+        );
+
+        // Final state: Released, amount unchanged (funds sent to worker)
+        let task = read_task(&env, &contract_addr, &task_id);
+        assert_eq!(task.status, STATUS_RELEASED);
+        assert_eq!(task.amount, amount);
+        // Locked balance is 0 after release (funds no longer in escrow)
+        let locked = get_task_locked_balance(&env, &contract_addr, &task_id);
+        assert_eq!(locked, 0);
     }
 
     // ------------------------------------------------------------------
