@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, symbol_short};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env};
 
 // ---------------------------------------------------------------------------
 // Storage layout decisions
@@ -78,14 +78,21 @@ impl TruvoContract {
 
         // 3. Persist the task record with the escrowed amount.
         let task = TaskData {
-            payer,
-            worker,
+            payer: payer.clone(),
+            worker: worker.clone(),
             amount,
             deadline,
             status: STATUS_CREATED,
             proof_hash: BytesN::<32>::from_array(&env, &[0u8; 32]),
         };
         env.storage().persistent().set(&key, &task);
+
+        // 4. Emit a task_created event for off-chain indexing.
+        #[allow(deprecated)]
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "task_created"),),
+            (task_id, payer, worker, amount, deadline),
+        );
     }
 
     /// Confirm that the worker has completed the task.
@@ -118,9 +125,16 @@ impl TruvoContract {
         }
 
         // 4. Record the proof and mark as confirmed.
-        task.proof_hash = proof_hash;
+        task.proof_hash = proof_hash.clone();
         task.status = STATUS_CONFIRMED;
         env.storage().persistent().set(&key, &task);
+
+        // 5. Emit a task_confirmed event for off-chain indexing.
+        #[allow(deprecated)]
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "task_confirmed"),),
+            (task_id, task.worker, proof_hash),
+        );
     }
 
     /// Release the escrowed funds to the worker.
@@ -153,10 +167,10 @@ impl TruvoContract {
         task.status = STATUS_RELEASED;
         env.storage().persistent().set(&key, &task);
 
-        // 4. Emit a release event for off-chain indexing.
+        // 4. Emit a task_released event for off-chain indexing.
         #[allow(deprecated)]
         env.events().publish(
-            (symbol_short!("release"),),
+            (soroban_sdk::Symbol::new(&env, "task_released"),),
             (task_id, task.worker, task.amount),
         );
     }
@@ -195,6 +209,13 @@ impl TruvoContract {
         // 4. Mark as refunded and persist.
         task.status = STATUS_REFUNDED;
         env.storage().persistent().set(&key, &task);
+
+        // 5. Emit a task_refunded event for off-chain indexing.
+        #[allow(deprecated)]
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "task_refunded"),),
+            (task_id, task.payer, task.amount),
+        );
     }
 
     /// Raise a dispute on a task.
@@ -246,6 +267,13 @@ impl TruvoContract {
         // 5. Move to "Disputed" status and persist.
         task.status = STATUS_DISPUTED;
         env.storage().persistent().set(&key, &task);
+
+        // 6. Emit a task_disputed event for off-chain indexing.
+        #[allow(deprecated)]
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "task_disputed"),),
+            (task_id, caller),
+        );
     }
 
     /// Initialize the contract with an arbitrator address.
@@ -310,6 +338,13 @@ impl TruvoContract {
             task.status = STATUS_REFUNDED;
         }
         env.storage().persistent().set(&key, &task);
+
+        // 6. Emit a task_resolved event for off-chain indexing.
+        #[allow(deprecated)]
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "task_resolved"),),
+            (task_id, arbitrator, favor_worker),
+        );
     }
 }
 
