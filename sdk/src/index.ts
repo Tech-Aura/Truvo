@@ -27,4 +27,34 @@ export {
   TruvoContractError,
 } from "./errors";
 
+export {
+  AnchorClient,
+  type AnchorClientConfig,
+  type InitiateWithdrawalInput,
+  type InitiateWithdrawalResult,
+  DEFAULT_ANCHOR_MAX_RETRIES,
+  DEFAULT_HORIZON_URL,
+  DEFAULT_QUOTE_URL,
+  isTerminalWithdrawalStatus,
+  kycStatusToState,
+} from "./anchor";
+export type {
+  WithdrawalStatus,
+  WithdrawalInteractiveResponse,
+  WithdrawalTransaction,
+  Sep24TransactionResponse,
+  WithdrawalKycState,
+  WithdrawalKycStatus,
+  AssetBalance,
+  AvailableBalance,
+  OraclePrice,
+  Sep38PricesResponse,
+  LocalValueEstimate,
+} from "./anchor";
+export {
+  TruvoAnchorError,
+  TruvoAnchorAuthError,
+  TruvoAnchorApiError,
+} from "./anchor";
+
 export const SDK_VERSION = "0.2.0";

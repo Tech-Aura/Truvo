@@ -474,6 +474,61 @@ to convert Stellar assets to fiat. The high-level flow:
 
 ---
 
+---
+
+## Price Oracle Choice (Currency Conversion Estimates)
+
+**Chosen oracle:** the test anchor's own SEP-38 Anchor Quote Server at
+`https://testanchor.stellar.org/sep38`.
+
+### Why
+
+- **Testnet-accessible:** works against the same host as the SEP-24/SEP-12
+  integration — no extra account, key, or third-party service required.
+- **SEP-38 compliant:** standard `GET /prices` endpoint with the SEP-38
+  Asset Identification Format (`stellar:native`, `stellar:SRT:<issuer>`,
+  `iso4217:USD`), so swapping in another SEP-38 provider for production is
+  a base-URL change in `AnchorClientConfig.quoteUrl`.
+- **Fiat pairs supported:** returns prices for `iso4217:USD` and
+  `iso4217:CAD` (see `GET /sep38/info`), matching the anchor's actual
+  withdrawal destination currencies.
+- **Consistent semantics:** prices come from the same anchor that executes
+  the withdrawal, so estimates are directionally consistent with the
+  anchor's own (final) rate.
+
+### Endpoint used
+
+```
+GET https://testanchor.stellar.org/sep38/prices
+    ?sell_asset=<SEP-38 asset>&sell_amount=<amount>&buy_asset=iso4217:<CURRENCY>
+```
+
+Response (verified live on testnet):
+
+```json
+{
+  "buy_assets": [
+    { "asset": "iso4217:USD", "price": "0.39000039", "decimals": 4 }
+  ]
+}
+```
+
+`price` is the amount of the buy asset per **one** unit of the sell asset
+(e.g. 1 XLM ≈ 0.39 USD on the test oracle; 10 XLM → ~3.90 USD).
+
+Alternatives considered: third-party crypto price APIs (CoinGecko,
+Coinbase oracle feeds) — rejected for this stage because they are not
+SEP-38-compatible, several require API keys, and none quote the anchor's
+fiat delivery pairs directly.
+
+### Usage in the SDK
+
+`AnchorClient.estimateLocalValue(amount, assetCode, targetCurrency)` wraps
+this endpoint. The result is explicitly an **estimate only, not a
+guaranteed rate**: the anchor's hosted interactive flow determines the
+final rate at withdrawal time, and fees/spread/price movement will change
+the actual proceeds.
+
 ## References
 
 - [SEP-24 Specification](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0024.md)

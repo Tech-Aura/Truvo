@@ -261,6 +261,129 @@ console.log("Released to:", released.worker, "amount:", released.amount);
 | `Refunded` | 3 | Funds refunded to payer (terminal) |
 | `Disputed` | 4 | Dispute raised, awaiting arbitrator resolution |
 
+## SEP-24 Interactive Withdrawal (Anchor)
+
+The SDK integrates with a Stellar anchor for fiat off-ramps, per `/docs/anchor-integration.md`. The default reference anchor is `testanchor.stellar.org` (Stellar testnet).
+
+```typescript
+import { AnchorClient, Networks } from "@truvo/sdk";
+import { Keypair } from "@stellar/stellar-sdk";
+
+const anchor = new AnchorClient({
+  authUrl: "https://testanchor.stellar.org/auth",
+  sep24Url: "https://testanchor.stellar.org/sep24",
+  networkPassphrase: Networks.TESTNET, // default
+});
+
+// 1. SEP-10 authentication (JWT is cached on the client).
+const worker = Keypair.fromSecret(workerSecretKey);
+await anchor.authenticate(worker);
+
+// 2. Initiate an interactive withdrawal.
+const withdrawal = await anchor.initiateWithdrawal(
+  "SRT",                       // asset code
+  "5",                         // amount (decimal string)
+  worker.publicKey(),          // worker's Stellar account
+);
+
+// 3. Open the anchor's hosted flow in a webview/popup or redirect:
+//    withdrawal.interactiveUrl  (e.g. in a <WebView source={{ uri }} />)
+//
+// 4. Track progress with withdrawal.transactionId via getWithdrawalStatus().
+```
+
+### Withdrawal status polling
+
+Poll `getWithdrawalStatus` while the worker completes the anchor's hosted flow to show real-time progress:
+
+```typescript
+import { isTerminalWithdrawalStatus, type WithdrawalStatus } from "@truvo/sdk";
+
+const tx = await anchor.getWithdrawalStatus(withdrawal.transactionId);
+console.log(tx.status); // e.g. "incomplete", "pending_user_transfer_start", "pending_anchor", "completed", "error"
+
+// Typical polling loop:
+const seen = new Set<WithdrawalStatus>();
+while (!isTerminalWithdrawalStatus(tx.status)) {
+  await new Promise((r) => setTimeout(r, 5_000));
+  const latest = await anchor.getWithdrawalStatus(withdrawal.transactionId);
+  if (latest.status !== tx.status) {
+    console.log("Status changed:", latest.status); // update UI here
+    tx.status = latest.status;
+  }
+}
+```
+
+### SEP-12 KYC handling
+
+Detect when the anchor requires KYC before the withdrawal can proceed, and show the worker a waiting/redirect state instead of a generic error. The anchor's hosted interactive flow collects the actual KYC data — no custom form needed:
+
+```typescript
+const kyc = await anchor.getWithdrawalKycStatus(withdrawal.transactionId, worker.publicKey());
+
+switch (kyc.state) {
+  case "kyc_approved":
+    // proceed with the withdrawal
+    break;
+  case "kyc_required":
+    // redirect the worker to the anchor's hosted flow:
+    // kyc.moreInfoUrl (or withdrawal.interactiveUrl)
+    break;
+  case "kyc_pending":
+    // show "KYC under review" waiting state
+    break;
+  case "kyc_rejected":
+    // show KYC-failed explainer
+    break;
+}
+```
+
+Requires `sep12Url` in the `AnchorClientConfig`:
+
+```typescript
+const anchor = new AnchorClient({
+  authUrl: "https://testanchor.stellar.org/auth",
+  sep24Url: "https://testanchor.stellar.org/sep24",
+  sep12Url: "https://testanchor.stellar.org/sep12",
+});
+```
+
+### Worker balance check (on-chain)
+
+Read the worker's actual wallet balance directly from the network (not the escrow contract) to show what's available to withdraw before starting the SEP-24 flow:
+
+```typescript
+// Native XLM (default):
+const balance = await anchor.getAvailableBalance(worker.publicKey());
+console.log(balance.available); // spendable: balance minus selling liabilities
+
+// An issued asset (issuer required):
+const srt = await anchor.getAvailableBalance(worker.publicKey(), "SRT", SRT_ISSUER);
+if (!srt.found) {
+  // no trustline / no balance for that asset
+}
+```
+
+`balance.balances` contains every asset the account holds, useful for wallet-style UIs. The anchor enforces its own min/max per transaction (1–10 units on the test anchor) — this helper only reports on-chain availability.
+
+### Currency conversion estimate (price oracle)
+
+Give the worker a rough local-currency preview of their balance before withdrawing. Estimates come from the anchor's SEP-38 quote server (the chosen testnet-accessible price oracle — see `/docs/anchor-integration.md` for rationale):
+
+```typescript
+// 10 XLM ≈ how much USD?
+const est = await anchor.estimateLocalValue("10", "XLM", "USD");
+console.log(est.display);   // e.g. "~3.90 USD"
+console.log(est.estimate);  // e.g. "3.9000039"
+
+// An issued asset (issuer required):
+const srt = await anchor.estimateLocalValue("5", "SRT", "USD", {
+  assetIssuer: SRT_ISSUER,
+});
+```
+
+⚠️ **Estimate only — not a guaranteed rate.** The anchor's own interactive flow determines the final rate at withdrawal time; actual proceeds will differ (fees, spread, price movement).
+
 ## Running Tests
 
 ```bash
