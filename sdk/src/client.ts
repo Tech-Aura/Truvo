@@ -581,6 +581,141 @@ export class TruvoClient {
   }
 
   // ------------------------------------------------------------------
+  // raiseDispute
+  // ------------------------------------------------------------------
+
+  /**
+   * Raise a dispute on a task.
+   *
+   * Wraps the contract's `raise_dispute` function. Either the payer or
+   * the worker may raise a dispute while the task is in `Created` or
+   * `Confirmed` status. The `caller` parameter is set to the client's
+   * public key, so the signing keypair must belong to the party
+   * raising the dispute.
+   *
+   * @param input - Contains `taskId` and `role` ("payer" or "worker").
+   * @returns A typed result containing the updated {@link Task} on success.
+   */
+  async raiseDispute(input: RaiseDisputeInput): Promise<TruvoResult> {
+    try {
+      const contract = new Contract(this.contractId);
+      const sourceAccount = await this.server.getAccount(
+        this.keypair.publicKey(),
+      );
+
+      // The caller address sent to the contract is the client's own public
+      // key. Soroban require_auth verifies that this address signed the
+      // transaction, so the role must match the actual signer.
+      const callerAddress = new Address(this.keypair.publicKey());
+
+      const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
+        .setNetworkPassphrase(this.networkPassphrase)
+        .setTimeout(30)
+        .addOperation(
+          contract.call(
+            "raise_dispute",
+            hex32ToScVal(input.taskId),
+            callerAddress.toScVal(),
+          ),
+        )
+        .build();
+
+      const preparedTx = await this.server.prepareTransaction(tx);
+      preparedTx.sign(this.keypair);
+
+      const sendResult = await this.server.sendTransaction(preparedTx);
+
+      if (sendResult.status === "ERROR") {
+        return {
+          ok: false,
+          error:
+            sendResult.errorResult?.toString() ?? "Transaction submission error",
+          txHash: sendResult.hash,
+        };
+      }
+
+      await this.waitForTransaction(sendResult.hash);
+      const task = await this.readTask(input.taskId);
+
+      return { ok: true, task, txHash: sendResult.hash };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // resolveDispute
+  // ------------------------------------------------------------------
+
+  /**
+   * Resolve a dispute in favor of either the worker or the payer.
+   *
+   * Wraps the contract's `resolve_dispute` function. **Only the
+   * designated arbitrator may call this function.** The arbitrator
+   * address is set at contract initialization and cannot be changed.
+   *
+   * The client must be constructed with the arbitrator's secret key.
+   * If a non-arbitrator key is used, the transaction will be rejected
+   * by the contract's `arbitrator.require_auth()` check.
+   *
+   * @param input - Contains `taskId` and `outcome` ("Worker" to release
+   *   funds to the worker, or "Payer" to refund the payer).
+   * @returns A typed result containing the updated {@link Task} on success.
+   */
+  async resolveDispute(input: ResolveDisputeInput): Promise<TruvoResult> {
+    try {
+      const contract = new Contract(this.contractId);
+      const sourceAccount = await this.server.getAccount(
+        this.keypair.publicKey(),
+      );
+
+      // Map DisputeOutcome to the contract's favor_worker boolean:
+      // "Worker" → true (release funds to worker)
+      // "Payer"  → false (refund to payer)
+      const favorWorker = input.outcome === "Worker";
+
+      const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
+        .setNetworkPassphrase(this.networkPassphrase)
+        .setTimeout(30)
+        .addOperation(
+          contract.call(
+            "resolve_dispute",
+            hex32ToScVal(input.taskId),
+            xdr.ScVal.scvBool(favorWorker),
+          ),
+        )
+        .build();
+
+      const preparedTx = await this.server.prepareTransaction(tx);
+      preparedTx.sign(this.keypair);
+
+      const sendResult = await this.server.sendTransaction(preparedTx);
+
+      if (sendResult.status === "ERROR") {
+        return {
+          ok: false,
+          error:
+            sendResult.errorResult?.toString() ?? "Transaction submission error",
+          txHash: sendResult.hash,
+        };
+      }
+
+      await this.waitForTransaction(sendResult.hash);
+      const task = await this.readTask(input.taskId);
+
+      return { ok: true, task, txHash: sendResult.hash };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  // ------------------------------------------------------------------
   // Private helpers
   // ------------------------------------------------------------------
 
