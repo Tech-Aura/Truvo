@@ -33,6 +33,7 @@ export {
   type InitiateWithdrawalInput,
   type InitiateWithdrawalResult,
   DEFAULT_ANCHOR_MAX_RETRIES,
+  isTerminalWithdrawalStatus,
 } from "./anchor";
 export type {
   WithdrawalStatus,

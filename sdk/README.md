@@ -292,6 +292,28 @@ const withdrawal = await anchor.initiateWithdrawal(
 // 4. Track progress with withdrawal.transactionId via getWithdrawalStatus().
 ```
 
+### Withdrawal status polling
+
+Poll `getWithdrawalStatus` while the worker completes the anchor's hosted flow to show real-time progress:
+
+```typescript
+import { isTerminalWithdrawalStatus, type WithdrawalStatus } from "@truvo/sdk";
+
+const tx = await anchor.getWithdrawalStatus(withdrawal.transactionId);
+console.log(tx.status); // e.g. "incomplete", "pending_user_transfer_start", "pending_anchor", "completed", "error"
+
+// Typical polling loop:
+const seen = new Set<WithdrawalStatus>();
+while (!isTerminalWithdrawalStatus(tx.status)) {
+  await new Promise((r) => setTimeout(r, 5_000));
+  const latest = await anchor.getWithdrawalStatus(withdrawal.transactionId);
+  if (latest.status !== tx.status) {
+    console.log("Status changed:", latest.status); // update UI here
+    tx.status = latest.status;
+  }
+}
+```
+
 ## Running Tests
 
 ```bash

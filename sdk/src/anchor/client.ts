@@ -15,7 +15,10 @@ import { TruvoAnchorApiError, TruvoAnchorAuthError, TruvoAnchorError } from "./e
 import type {
   Sep10ChallengeResponse,
   Sep10TokenResponse,
+  Sep24TransactionResponse,
   WithdrawalInteractiveResponse,
+  WithdrawalStatus,
+  WithdrawalTransaction,
 } from "./types";
 
 // ============================================================================
@@ -263,6 +266,55 @@ export class AnchorClient {
     };
   }
 
+  /**
+   * Fetch the current status of a SEP-24 withdrawal transaction.
+   *
+   * Calls `GET {sep24Url}/transaction?id={txId}` and returns the anchor's
+   * transaction record with a typed {@link WithdrawalStatus}, so the
+   * frontend can show the worker real-time progress after they've opened
+   * (and ideally completed) the anchor's hosted interactive flow.
+   *
+   * Typical progression for withdrawals:
+   * `incomplete` → `pending_user_transfer_start` → `pending_anchor` →
+   * `completed` (or `error` / `expired` / `refunded` on failure).
+   *
+   * Poll this method on an interval (e.g. every 5–10 s) while the status is
+   * non-terminal (see {@link isTerminalWithdrawalStatus}).
+   *
+   * Requires an authenticated session (see {@link ensureAuthenticated}).
+   *
+   * @param txId - The transaction ID from {@link initiateWithdrawal}
+   *   ({@link InitiateWithdrawalResult.transactionId}).
+   * @returns The full withdrawal transaction record, including the typed status.
+   * @throws {TruvoAnchorAuthError} If not authenticated.
+   * @throws {TruvoAnchorApiError} If the anchor rejects the request (e.g. 404 for an unknown `txId`).
+   * @throws {TruvoAnchorError} If the anchor returns a malformed record or an unrecognized status.
+   */
+  async getWithdrawalStatus(txId: string): Promise<WithdrawalTransaction> {
+    await this.ensureAuthenticated();
+
+    const response = await this.httpGetJson<Sep24TransactionResponse>(
+      `${this.sep24Url}/transaction?id=${encodeURIComponent(txId)}`,
+      "GET /sep24/transaction",
+      { Authorization: `Bearer ${this.getRequiredToken()}` },
+    );
+
+    const tx = response?.transaction;
+    if (!tx || typeof tx.id !== "string" || typeof tx.status !== "string") {
+      throw new TruvoAnchorError(
+        "Anchor returned a malformed transaction response (missing transaction, id, or status)",
+      );
+    }
+
+    if (!SEP24_TRANSACTION_STATUSES.has(tx.status)) {
+      throw new TruvoAnchorError(
+        `Anchor returned an unrecognized SEP-24 transaction status: "${tx.status}" for transaction ${tx.id}`,
+      );
+    }
+
+    return { ...tx, status: tx.status as WithdrawalStatus };
+  }
+
   // ------------------------------------------------------------------
   // HTTP helpers
   // ------------------------------------------------------------------
@@ -392,3 +444,35 @@ export class AnchorClient {
 
 /** Default maximum number of retries for anchor HTTP requests. */
 export const DEFAULT_ANCHOR_MAX_RETRIES = 3;
+
+/**
+ * All withdrawal statuses defined by SEP-24 (see {@link WithdrawalStatus}).
+ * Used to validate the anchor's response before surfacing it as a typed status.
+ */
+const SEP24_TRANSACTION_STATUSES: ReadonlySet<string> = new Set([
+  "incomplete",
+  "pending_user_transfer_start",
+  "pending_user_transfer_complete",
+  "pending_anchor",
+  "pending_stellar",
+  "pending_trust",
+  "pending_account",
+  "completed",
+  "refunded",
+  "expired",
+  "error",
+]);
+
+/**
+ * Whether a withdrawal status is terminal (no further polling needed).
+ *
+ * Terminal statuses: `completed`, `refunded`, `expired`, `error`.
+ */
+export function isTerminalWithdrawalStatus(status: WithdrawalStatus): boolean {
+  return (
+    status === "completed" ||
+    status === "refunded" ||
+    status === "expired" ||
+    status === "error"
+  );
+}
