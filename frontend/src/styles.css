@@ -1,0 +1,113 @@
+/* Layout */
+.app {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+.main {
+  padding: 1.5rem 0;
+}
+
+/* Navbar */
+.navbar {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid #1a1f2e;
+  flex-wrap: wrap;
+}
+
+.nav-brand h1 {
+  font-size: 1.2rem;
+  margin: 0;
+}
+
+.brand-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #7aa2f7;
+  border: 1px solid #7aa2f7;
+  border-radius: 999px;
+  padding: 0.1em 0.6em;
+  vertical-align: middle;
+  margin-left: 0.35em;
+}
+
+.nav-links {
+  display: flex;
+  gap: 0.5rem;
+  flex: 1;
+}
+
+.nav-links a {
+  padding: 0.35em 0.9em;
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.nav-links a:hover {
+  text-decoration: none;
+  background-color: #1a1f2e;
+}
+
+.nav-links a.active {
+  color: #ffffff;
+  background-color: #1a1f2e;
+}
+
+/* Wallet widget */
+.wallet-widget {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.wallet-key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.wallet-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border-radius: 999px;
+  padding: 0.15em 0.7em;
+}
+
+.badge-testnet {
+  color: #9ece6a;
+  border: 1px solid #9ece6a;
+}
+
+.badge-other {
+  color: #e0af68;
+  border: 1px solid #e0af68;
+}
+
+.wallet-warning {
+  font-size: 0.8rem;
+  color: #e0af68;
+}
+
+.wallet-error {
+  font-size: 0.8rem;
+  color: #f7768e;
+  max-width: 260px;
+}
+
+/* Views */
+.view h2 {
+  margin-top: 0;
+}
+
+.hint {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.9rem;
+  word-break: break-all;
+}
