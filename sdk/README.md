@@ -348,6 +348,24 @@ const anchor = new AnchorClient({
 });
 ```
 
+### Worker balance check (on-chain)
+
+Read the worker's actual wallet balance directly from the network (not the escrow contract) to show what's available to withdraw before starting the SEP-24 flow:
+
+```typescript
+// Native XLM (default):
+const balance = await anchor.getAvailableBalance(worker.publicKey());
+console.log(balance.available); // spendable: balance minus selling liabilities
+
+// An issued asset (issuer required):
+const srt = await anchor.getAvailableBalance(worker.publicKey(), "SRT", SRT_ISSUER);
+if (!srt.found) {
+  // no trustline / no balance for that asset
+}
+```
+
+`balance.balances` contains every asset the account holds, useful for wallet-style UIs. The anchor enforces its own min/max per transaction (1–10 units on the test anchor) — this helper only reports on-chain availability.
+
 ## Running Tests
 
 ```bash

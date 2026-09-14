@@ -13,6 +13,7 @@ export {
   type InitiateWithdrawalInput,
   type InitiateWithdrawalResult,
   DEFAULT_ANCHOR_MAX_RETRIES,
+  DEFAULT_HORIZON_URL,
   isTerminalWithdrawalStatus,
   kycStatusToState,
 } from "./client";
@@ -35,4 +36,6 @@ export type {
   Sep12CustomerResponse,
   WithdrawalKycState,
   WithdrawalKycStatus,
+  AssetBalance,
+  AvailableBalance,
 } from "./types";

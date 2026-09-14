@@ -171,6 +171,54 @@ export interface Sep12CustomerResponse {
 }
 
 // ============================================================================
+// On-chain balance (worker wallet)
+// ============================================================================
+
+/**
+ * A single asset balance held by a Stellar account, as reported by the
+ * network (Horizon).
+ */
+export interface AssetBalance {
+  /**
+   * Asset code: `"XLM"` for the native asset, otherwise the issued asset
+   * code (e.g. `"SRT"`, `"USDC"`).
+   */
+  assetCode: string;
+  /** Issuer public key (G…) for issued assets; absent for native XLM. */
+  assetIssuer?: string;
+  /** Balance as a decimal string (e.g. `"10000.0000000"`). */
+  balance: string;
+  /** Raw Horizon asset type (`native`, `credit_alphanum4`, `credit_alphanum12`). */
+  assetType: string;
+  /** Selling liabilities as a decimal string (committed to offers). */
+  sellingLiabilities: string;
+  /** Buying liabilities as a decimal string. */
+  buyingLiabilities: string;
+  /** Whether the issuer has authorized the trustline (issued assets only). */
+  authorized?: boolean;
+}
+
+/** Result of {@link AnchorClient.getAvailableBalance}. */
+export interface AvailableBalance {
+  /** The queried account's public key. */
+  account: string;
+  /**
+   * Spendable balance of the requested asset as a decimal string — the
+   * raw balance minus selling liabilities. `"0"` when the account holds
+   * no balance of the asset ({@link AvailableBalance.found} is `false`).
+   */
+  available: string;
+  /** Whether the account holds any balance of the requested asset. */
+  found: boolean;
+  /** The requested asset code. */
+  assetCode: string;
+  /** The requested asset issuer, when specified. */
+  assetIssuer?: string;
+  /** All balances held by the account (useful for wallet UIs). */
+  balances: AssetBalance[];
+}
+
+// ============================================================================
 // KYC-aware withdrawal state
 // ============================================================================
 

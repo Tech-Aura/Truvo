@@ -9,10 +9,17 @@
  * transient failures and throw typed errors on API rejections.
  */
 
-import { Keypair, Networks, TransactionBuilder } from "@stellar/stellar-sdk";
+import {
+  Horizon,
+  Keypair,
+  Networks,
+  TransactionBuilder,
+} from "@stellar/stellar-sdk";
 import { retryWithBackoff } from "../retry";
 import { TruvoAnchorApiError, TruvoAnchorAuthError, TruvoAnchorError } from "./errors";
 import type {
+  AssetBalance,
+  AvailableBalance,
   KycStatus,
   Sep10ChallengeResponse,
   Sep10TokenResponse,
@@ -41,6 +48,11 @@ export interface AnchorClientConfig {
    * {@link AnchorClient.getWithdrawalKycStatus}).
    */
   sep12Url?: string;
+  /**
+   * Horizon API base URL for on-chain queries
+   * (defaults to `"https://horizon-testnet.stellar.org"`).
+   */
+  horizonUrl?: string;
   /** Network passphrase the anchor operates on (defaults to testnet). */
   networkPassphrase?: string;
   /**
@@ -118,6 +130,7 @@ export class AnchorClient {
   private readonly authUrl: string;
   private readonly sep24Url: string;
   private readonly sep12Url: string | undefined;
+  private readonly horizonUrl: string;
   private readonly networkPassphrase: string;
   private readonly maxRetries: number;
 
@@ -130,6 +143,7 @@ export class AnchorClient {
     this.authUrl = config.authUrl;
     this.sep24Url = config.sep24Url;
     this.sep12Url = config.sep12Url;
+    this.horizonUrl = config.horizonUrl ?? DEFAULT_HORIZON_URL;
     this.networkPassphrase = config.networkPassphrase ?? Networks.TESTNET;
     this.authToken = config.authToken;
     this.maxRetries = config.maxRetries ?? DEFAULT_ANCHOR_MAX_RETRIES;
@@ -400,6 +414,93 @@ export class AnchorClient {
     };
   }
 
+  /**
+   * Read the worker's **on-chain** Stellar balance directly from the
+   * network (Horizon), *not* from the escrow contract. Use this to show
+   * how much the worker can actually withdraw **before** starting the
+   * SEP-24 flow — i.e. after escrow funds have already been released to
+   * their wallet.
+   *
+   * The returned `available` value is the spendable balance: the raw
+   * balance minus selling liabilities (e.g. amounts committed to open
+   * offers). This is **not** a guarantee of what the anchor will accept
+   * — the anchor enforces its own min/max limits (the test anchor caps
+   * withdrawals at 1–10 units per transaction).
+   *
+   * @param account - Public key (G…) of the worker's Stellar account.
+   * @param assetCode - Asset to check: `"XLM"` (default) for the native
+   *   asset, or an issued asset code such as `"SRT"` / `"USDC"`.
+   * @param assetIssuer - Required when `assetCode` is an issued asset
+   *   (the issuer's public key, G…). Ignored for `"XLM"`.
+   * @returns The spendable balance plus the account's full balance list.
+   * @throws {TruvoNetworkError} If the account does not exist on-chain
+   *   (e.g. unfunded account).
+   * @throws {TruvoAnchorApiError} If Horizon returns a non-2xx response.
+   */
+  async getAvailableBalance(
+    account: string,
+    assetCode = "XLM",
+    assetIssuer?: string,
+  ): Promise<AvailableBalance> {
+    const server = new Horizon.Server(this.horizonUrl);
+
+    const accountResponse = await retryWithBackoff(
+      () => server.loadAccount(account),
+      `loadAccount(${account.slice(0, 8)}…)`,
+      this.maxRetries,
+    );
+
+    const balances: AssetBalance[] = accountResponse.balances.map((b) => {
+      const code =
+        (b as { asset_code?: string }).asset_code ??
+        (b.asset_type === "native" ? "native" : "unknown");
+      return {
+        assetCode: normalizeAssetCode(code),
+        assetIssuer: (b as { asset_issuer?: string }).asset_issuer,
+        balance: String(b.balance),
+        assetType: b.asset_type,
+        sellingLiabilities: String(
+          (b as { selling_liabilities?: string }).selling_liabilities ?? "0",
+        ),
+        buyingLiabilities: String(
+          (b as { buying_liabilities?: string }).buying_liabilities ?? "0",
+        ),
+        authorized: (b as { authorized?: boolean }).authorized,
+      };
+    });
+
+    const wanted = normalizeAssetCode(assetCode);
+    const match = balances.find(
+      (b) =>
+        b.assetCode === wanted &&
+        (wanted === "XLM" ||
+          assetIssuer === undefined ||
+          b.assetIssuer === assetIssuer),
+    );
+
+    if (!match) {
+      return {
+        account,
+        available: "0",
+        found: false,
+        assetCode: wanted,
+        assetIssuer,
+        balances,
+      };
+    }
+
+    const available = subtractDecimalStrings(match.balance, match.sellingLiabilities);
+
+    return {
+      account,
+      available,
+      found: true,
+      assetCode: wanted,
+      assetIssuer,
+      balances,
+    };
+  }
+
   // ------------------------------------------------------------------
   // SEP-12 private helpers
   // ------------------------------------------------------------------
@@ -571,6 +672,40 @@ export class AnchorClient {
 
 /** Default maximum number of retries for anchor HTTP requests. */
 export const DEFAULT_ANCHOR_MAX_RETRIES = 3;
+
+/** Default Horizon endpoint used for on-chain balance queries (testnet). */
+export const DEFAULT_HORIZON_URL = "https://horizon-testnet.stellar.org";
+
+/**
+ * Normalizes an asset code for display: the Horizon native balance uses
+ * asset_type `"native"`, which we surface as `"XLM"`.
+ */
+function normalizeAssetCode(code: string): string {
+  return code === "native" ? "XLM" : code;
+}
+
+/**
+ * Subtract two non-negative decimal strings (`a - b`) without floating
+ * point error, using BigInt arithmetic scaled to the operands' shared
+ * decimal precision. Used for balance-minus-liabilities math.
+ */
+function subtractDecimalStrings(a: string, b: string): string {
+  const scale = Math.max(
+    (a.split(".")[1] ?? "").length,
+    (b.split(".")[1] ?? "").length,
+  );
+  const toUnits = (s: string): bigint => {
+    const [int, frac = ""] = s.split(".");
+    return BigInt(int + frac.padEnd(scale, "0"));
+  };
+  const diff = toUnits(a) - toUnits(b);
+  if (scale === 0) return diff.toString();
+  const negative = diff < 0n;
+  const abs = negative ? -diff : diff;
+  const int = abs / BigInt(10 ** scale);
+  const frac = (abs % BigInt(10 ** scale)).toString().padStart(scale, "0");
+  return `${negative ? "-" : ""}${int}.${frac}`;
+}
 
 /**
  * All withdrawal statuses defined by SEP-24 (see {@link WithdrawalStatus}).

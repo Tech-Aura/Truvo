@@ -33,6 +33,7 @@ export {
   type InitiateWithdrawalInput,
   type InitiateWithdrawalResult,
   DEFAULT_ANCHOR_MAX_RETRIES,
+  DEFAULT_HORIZON_URL,
   isTerminalWithdrawalStatus,
   kycStatusToState,
 } from "./anchor";
@@ -43,6 +44,8 @@ export type {
   Sep24TransactionResponse,
   WithdrawalKycState,
   WithdrawalKycStatus,
+  AssetBalance,
+  AvailableBalance,
 } from "./anchor";
 export {
   TruvoAnchorError,
