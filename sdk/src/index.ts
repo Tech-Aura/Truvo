@@ -13,7 +13,12 @@ export {
   type TruvoClientConfig,
   type CreateEscrowInput,
   type ConfirmTaskInput,
+  type ReleaseFundsInput,
+  type RefundExpiredInput,
+  type RaiseDisputeInput,
+  type ResolveDisputeInput,
   type TruvoResult,
+  type ReleaseFundsResult,
 } from "./client";
 
 export const SDK_VERSION = "0.1.0";

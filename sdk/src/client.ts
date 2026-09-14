@@ -57,9 +57,50 @@ export interface ConfirmTaskInput {
   proofHash: string;
 }
 
+/** Input for {@link TruvoClient.releaseFunds}. */
+export interface ReleaseFundsInput {
+  /** 32-byte task identifier as a 64-character hex string. */
+  taskId: string;
+}
+
+/** Input for {@link TruvoClient.refundExpired}. */
+export interface RefundExpiredInput {
+  /** 32-byte task identifier as a 64-character hex string. */
+  taskId: string;
+}
+
+/** Input for {@link TruvoClient.raiseDispute}. */
+export interface RaiseDisputeInput {
+  /** 32-byte task identifier as a 64-character hex string. */
+  taskId: string;
+  /** The role of the caller raising the dispute. */
+  role: "payer" | "worker";
+}
+
+/** Input for {@link TruvoClient.resolveDispute}. */
+export interface ResolveDisputeInput {
+  /** 32-byte task identifier as a 64-character hex string. */
+  taskId: string;
+  /** The arbitrator's decision: release funds to worker or refund payer. */
+  outcome: DisputeOutcome;
+}
+
 /** Typed result returned by most SDK methods. */
 export type TruvoResult =
   | { ok: true; task: Task; txHash: string }
+  | { ok: false; error: string; txHash?: string };
+
+/** Result type for {@link TruvoClient.releaseFunds}. */
+export type ReleaseFundsResult =
+  | {
+      ok: true;
+      task: Task;
+      txHash: string;
+      /** Worker address that received the funds (from the contract event). */
+      worker: string;
+      /** Amount released (from the contract event). */
+      amount: string;
+    }
   | { ok: false; error: string; txHash?: string };
 
 // ============================================================================
@@ -358,20 +399,96 @@ export class TruvoClient {
   }
 
   // ------------------------------------------------------------------
+  // releaseFunds
+  // ------------------------------------------------------------------
+
+  /**
+   * Release escrowed funds to the worker.
+   *
+   * Wraps the contract's `release_funds` function. The task must be in
+   * `Confirmed` status. No Soroban `require_auth` is needed (any funded
+   * account can submit this transaction).
+   *
+   * The returned result includes the `worker` address and `amount`
+   * extracted from the contract's emitted `task_released` event, which
+   * provides the authoritative transfer details.
+   *
+   * @param input - Contains `taskId` (32-byte hex string).
+   * @returns A typed result containing the updated {@link Task} plus
+   *   event-derived `worker` and `amount` on success.
+   */
+  async releaseFunds(input: ReleaseFundsInput): Promise<ReleaseFundsResult> {
+    try {
+      const contract = new Contract(this.contractId);
+      const sourceAccount = await this.server.getAccount(
+        this.keypair.publicKey(),
+      );
+
+      const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
+        .setNetworkPassphrase(this.networkPassphrase)
+        .setTimeout(30)
+        .addOperation(
+          contract.call("release_funds", hex32ToScVal(input.taskId)),
+        )
+        .build();
+
+      const preparedTx = await this.server.prepareTransaction(tx);
+      preparedTx.sign(this.keypair);
+
+      const sendResult = await this.server.sendTransaction(preparedTx);
+
+      if (sendResult.status === "ERROR") {
+        return {
+          ok: false,
+          error:
+            sendResult.errorResult?.toString() ?? "Transaction submission error",
+          txHash: sendResult.hash,
+        };
+      }
+
+      const meta = await this.waitForTransactionGetMeta(sendResult.hash);
+      const task = await this.readTask(input.taskId);
+
+      // Parse the `task_released` event for authoritative transfer details.
+      // Event data: (task_id, worker, amount)
+      let worker = task.worker;
+      let amount = task.amount;
+
+      const eventData = meta ? findContractEvent(meta, "task_released") : null;
+      if (eventData) {
+        const eventVec = eventData.vec();
+        if (eventVec && eventVec.length >= 3) {
+          worker = scValToAddress(eventVec[1]);
+          amount = scValToI128(eventVec[2]);
+        }
+      }
+
+      return { ok: true, task, txHash: sendResult.hash, worker, amount };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  // ------------------------------------------------------------------
   // Private helpers
   // ------------------------------------------------------------------
 
   /**
    * Poll `getTransaction` until the transaction is confirmed or fails.
-   * Throws on failure or timeout.
+   * Returns the transaction metadata on success, throws on failure/timeout.
    */
-  private async waitForTransaction(hash: string): Promise<void> {
+  private async waitForTransactionGetMeta(
+    hash: string,
+  ): Promise<xdr.TransactionMeta | null> {
     const MAX_ATTEMPTS = 30;
     for (let i = 0; i < MAX_ATTEMPTS; i++) {
       const result = await this.server.getTransaction(hash);
 
       if (result.status === "SUCCESS") {
-        return;
+        return result.resultMetaXdr;
       }
 
       if (result.status === "FAILED") {
@@ -387,6 +504,14 @@ export class TruvoClient {
     throw new Error(
       `Transaction ${hash} was not confirmed after ${MAX_ATTEMPTS} attempts`,
     );
+  }
+
+  /**
+   * Poll `getTransaction` until the transaction is confirmed or fails.
+   * Convenience wrapper that discards metadata.
+   */
+  private async waitForTransaction(hash: string): Promise<void> {
+    await this.waitForTransactionGetMeta(hash);
   }
 
   /**
