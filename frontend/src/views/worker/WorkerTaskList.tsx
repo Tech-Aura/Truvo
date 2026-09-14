@@ -2,14 +2,16 @@
  * Worker task list component.
  *
  * Displays tasks assigned to the connected worker's address.
- * Shows task details (task_id, payer, amount, deadline, status), and provides
+ * Shows task details (task_id, payer, amount, deadline, status), provides
  * filtering and clear visual distinctions between tasks awaiting worker action
- * (Created) versus completed/released tasks.
+ * (Created) versus completed/released tasks, and provides the completion-proof
+ * submission flow.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { EscrowTask, TaskStatus } from "../../types/task";
 import { getMockWorkerTasks } from "./mockTasks";
+import { SubmitProofModal } from "./SubmitProofModal";
 
 /** Status display metadata matching contract codes. */
 const STATUS_META: Record<TaskStatus, { label: string; badgeClass: string }> = {
@@ -57,40 +59,95 @@ interface WorkerTaskListProps {
   tasks?: EscrowTask[];
   /** Connected worker wallet address. */
   workerAddress?: string | null;
+  /**
+   * Placeholder submit handler for proof submission. Real SDK call
+   * (TruvoClient.confirmTask) replaces this in a later branch.
+   */
+  onSubmitProofPlaceholder?: (
+    taskId: string,
+    proofHash: string,
+    description: string,
+  ) => void;
 }
 
 export function WorkerTaskList({
   tasks: customTasks,
   workerAddress,
+  onSubmitProofPlaceholder = (taskId, proofHash, description) => {
+    console.log(
+      "[placeholder] TruvoClient.confirmTask would be called with:",
+      JSON.stringify(
+        {
+          taskId,
+          proofHash,
+          description,
+        },
+        null,
+        2,
+      ),
+    );
+  },
 }: WorkerTaskListProps) {
   const [filter, setFilter] = useState<TaskFilter>("all");
-
-  const allTasks = useMemo(() => {
+  const [taskList, setTaskList] = useState<EscrowTask[]>(() => {
     return customTasks ?? getMockWorkerTasks(workerAddress);
+  });
+  const [selectedTaskForProof, setSelectedTaskForProof] =
+    useState<EscrowTask | null>(null);
+  const [successNotice, setSuccessNotice] = useState<{
+    taskId: string;
+    proofHash: string;
+  } | null>(null);
+
+  // Sync if customTasks or workerAddress changes
+  useEffect(() => {
+    setTaskList(customTasks ?? getMockWorkerTasks(workerAddress));
   }, [customTasks, workerAddress]);
 
   const awaitingActionCount = useMemo(
-    () => allTasks.filter((t) => t.status === TaskStatus.Created).length,
-    [allTasks],
+    () => taskList.filter((t) => t.status === TaskStatus.Created).length,
+    [taskList],
   );
 
   const completedCount = useMemo(
-    () => allTasks.filter((t) => t.status === TaskStatus.Released).length,
-    [allTasks],
+    () => taskList.filter((t) => t.status === TaskStatus.Released).length,
+    [taskList],
   );
 
   const filteredTasks = useMemo(() => {
     switch (filter) {
       case "awaiting_action":
-        return allTasks.filter((t) => t.status === TaskStatus.Created);
+        return taskList.filter((t) => t.status === TaskStatus.Created);
       case "completed":
-        return allTasks.filter((t) => t.status === TaskStatus.Released);
+        return taskList.filter((t) => t.status === TaskStatus.Released);
       default:
-        return allTasks;
+        return taskList;
     }
-  }, [allTasks, filter]);
+  }, [taskList, filter]);
 
-  if (allTasks.length === 0) {
+  const handleProofSubmit = (
+    taskId: string,
+    proofHash: string,
+    description: string,
+  ) => {
+    // 1. Call placeholder handler (logs to console; wired to SDK in later branch)
+    onSubmitProofPlaceholder(taskId, proofHash, description);
+
+    // 2. Update local state to transition task to Confirmed status
+    setTaskList((prev) =>
+      prev.map((task) =>
+        task.task_id === taskId
+          ? { ...task, status: TaskStatus.Confirmed, proof_hash: proofHash }
+          : task,
+      ),
+    );
+
+    // 3. Set success banner and close modal
+    setSuccessNotice({ taskId, proofHash });
+    setSelectedTaskForProof(null);
+  };
+
+  if (taskList.length === 0) {
     return (
       <div className="worker-task-list">
         <h3>Assigned Tasks</h3>
@@ -116,7 +173,7 @@ export function WorkerTaskList({
             className={`filter-btn ${filter === "all" ? "active" : ""}`}
             onClick={() => setFilter("all")}
           >
-            All ({allTasks.length})
+            All ({taskList.length})
           </button>
           <button
             type="button"
@@ -141,7 +198,7 @@ export function WorkerTaskList({
       <div className="worker-summary-cards">
         <div className="summary-card">
           <span className="summary-label">Total Assigned</span>
-          <span className="summary-value">{allTasks.length}</span>
+          <span className="summary-value">{taskList.length}</span>
         </div>
         <div className="summary-card summary-card-attention">
           <span className="summary-label">Awaiting Proof</span>
@@ -152,6 +209,30 @@ export function WorkerTaskList({
           <span className="summary-value">{completedCount}</span>
         </div>
       </div>
+
+      {/* Success Notification Banner */}
+      {successNotice && (
+        <div className="worker-alert-success" role="status">
+          <div>
+            <strong>Proof Submitted Successfully!</strong>
+            <p>
+              Task <code className="mono">{truncateMiddle(successNotice.taskId)}</code>{" "}
+              is now <strong>Confirmed</strong>. Proof hash:{" "}
+              <code className="mono">{truncateMiddle(successNotice.proofHash, 10, 8)}</code>{" "}
+              has been recorded (placeholder). The requester can now verify the
+              proof and release funds.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn-dismiss"
+            onClick={() => setSuccessNotice(null)}
+            aria-label="Dismiss message"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {filteredTasks.length === 0 ? (
         <p className="hint">No tasks match the selected filter.</p>
@@ -193,9 +274,14 @@ export function WorkerTaskList({
                     </td>
                     <td>
                       {task.status === TaskStatus.Created && (
-                        <span className="action-pill pill-action-needed">
-                          Proof Needed
-                        </span>
+                        <button
+                          type="button"
+                          className="btn-action primary-sm"
+                          onClick={() => setSelectedTaskForProof(task)}
+                          title="Submit completion proof for this task"
+                        >
+                          Submit Proof
+                        </button>
                       )}
                       {task.status === TaskStatus.Confirmed && (
                         <span className="action-pill pill-pending">
@@ -227,8 +313,17 @@ export function WorkerTaskList({
       )}
 
       <p className="table-note hint">
-        Showing mock data — on-chain task fetching is wired in a later branch.
+        Showing mock data — on-chain task fetching and contract execution are wired in a later branch.
       </p>
+
+      {/* Completion Proof Submission Modal */}
+      {selectedTaskForProof && (
+        <SubmitProofModal
+          task={selectedTaskForProof}
+          onClose={() => setSelectedTaskForProof(null)}
+          onSubmit={handleProofSubmit}
+        />
+      )}
     </div>
   );
 }
