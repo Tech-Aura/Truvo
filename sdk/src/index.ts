@@ -27,4 +27,23 @@ export {
   TruvoContractError,
 } from "./errors";
 
+export {
+  AnchorClient,
+  type AnchorClientConfig,
+  type InitiateWithdrawalInput,
+  type InitiateWithdrawalResult,
+  DEFAULT_ANCHOR_MAX_RETRIES,
+} from "./anchor";
+export type {
+  WithdrawalStatus,
+  WithdrawalInteractiveResponse,
+  WithdrawalTransaction,
+  Sep24TransactionResponse,
+} from "./anchor";
+export {
+  TruvoAnchorError,
+  TruvoAnchorAuthError,
+  TruvoAnchorApiError,
+} from "./anchor";
+
 export const SDK_VERSION = "0.2.0";

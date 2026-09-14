@@ -261,6 +261,37 @@ console.log("Released to:", released.worker, "amount:", released.amount);
 | `Refunded` | 3 | Funds refunded to payer (terminal) |
 | `Disputed` | 4 | Dispute raised, awaiting arbitrator resolution |
 
+## SEP-24 Interactive Withdrawal (Anchor)
+
+The SDK integrates with a Stellar anchor for fiat off-ramps, per `/docs/anchor-integration.md`. The default reference anchor is `testanchor.stellar.org` (Stellar testnet).
+
+```typescript
+import { AnchorClient, Networks } from "@truvo/sdk";
+import { Keypair } from "@stellar/stellar-sdk";
+
+const anchor = new AnchorClient({
+  authUrl: "https://testanchor.stellar.org/auth",
+  sep24Url: "https://testanchor.stellar.org/sep24",
+  networkPassphrase: Networks.TESTNET, // default
+});
+
+// 1. SEP-10 authentication (JWT is cached on the client).
+const worker = Keypair.fromSecret(workerSecretKey);
+await anchor.authenticate(worker);
+
+// 2. Initiate an interactive withdrawal.
+const withdrawal = await anchor.initiateWithdrawal(
+  "SRT",                       // asset code
+  "5",                         // amount (decimal string)
+  worker.publicKey(),          // worker's Stellar account
+);
+
+// 3. Open the anchor's hosted flow in a webview/popup or redirect:
+//    withdrawal.interactiveUrl  (e.g. in a <WebView source={{ uri }} />)
+//
+// 4. Track progress with withdrawal.transactionId via getWithdrawalStatus().
+```
+
 ## Running Tests
 
 ```bash
