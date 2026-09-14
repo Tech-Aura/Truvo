@@ -14,6 +14,7 @@ export {
   type InitiateWithdrawalResult,
   DEFAULT_ANCHOR_MAX_RETRIES,
   isTerminalWithdrawalStatus,
+  kycStatusToState,
 } from "./client";
 
 export {
@@ -32,4 +33,6 @@ export type {
   KycStatus,
   KycField,
   Sep12CustomerResponse,
+  WithdrawalKycState,
+  WithdrawalKycStatus,
 } from "./types";

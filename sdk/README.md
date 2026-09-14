@@ -314,6 +314,40 @@ while (!isTerminalWithdrawalStatus(tx.status)) {
 }
 ```
 
+### SEP-12 KYC handling
+
+Detect when the anchor requires KYC before the withdrawal can proceed, and show the worker a waiting/redirect state instead of a generic error. The anchor's hosted interactive flow collects the actual KYC data — no custom form needed:
+
+```typescript
+const kyc = await anchor.getWithdrawalKycStatus(withdrawal.transactionId, worker.publicKey());
+
+switch (kyc.state) {
+  case "kyc_approved":
+    // proceed with the withdrawal
+    break;
+  case "kyc_required":
+    // redirect the worker to the anchor's hosted flow:
+    // kyc.moreInfoUrl (or withdrawal.interactiveUrl)
+    break;
+  case "kyc_pending":
+    // show "KYC under review" waiting state
+    break;
+  case "kyc_rejected":
+    // show KYC-failed explainer
+    break;
+}
+```
+
+Requires `sep12Url` in the `AnchorClientConfig`:
+
+```typescript
+const anchor = new AnchorClient({
+  authUrl: "https://testanchor.stellar.org/auth",
+  sep24Url: "https://testanchor.stellar.org/sep24",
+  sep12Url: "https://testanchor.stellar.org/sep12",
+});
+```
+
 ## Running Tests
 
 ```bash

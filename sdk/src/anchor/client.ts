@@ -13,10 +13,14 @@ import { Keypair, Networks, TransactionBuilder } from "@stellar/stellar-sdk";
 import { retryWithBackoff } from "../retry";
 import { TruvoAnchorApiError, TruvoAnchorAuthError, TruvoAnchorError } from "./errors";
 import type {
+  KycStatus,
   Sep10ChallengeResponse,
   Sep10TokenResponse,
+  Sep12CustomerResponse,
   Sep24TransactionResponse,
   WithdrawalInteractiveResponse,
+  WithdrawalKycState,
+  WithdrawalKycStatus,
   WithdrawalStatus,
   WithdrawalTransaction,
 } from "./types";
@@ -31,6 +35,12 @@ export interface AnchorClientConfig {
   authUrl: string;
   /** SEP-24 transfer server base URL (e.g. `"https://testanchor.stellar.org/sep24"`). */
   sep24Url: string;
+  /**
+   * SEP-12 KYC server base URL (e.g. `"https://testanchor.stellar.org/sep12"`).
+   * Required for the KYC-aware helpers ({@link AnchorClient.getCustomerKycStatus},
+   * {@link AnchorClient.getWithdrawalKycStatus}).
+   */
+  sep12Url?: string;
   /** Network passphrase the anchor operates on (defaults to testnet). */
   networkPassphrase?: string;
   /**
@@ -107,6 +117,7 @@ export interface InitiateWithdrawalResult {
 export class AnchorClient {
   private readonly authUrl: string;
   private readonly sep24Url: string;
+  private readonly sep12Url: string | undefined;
   private readonly networkPassphrase: string;
   private readonly maxRetries: number;
 
@@ -118,6 +129,7 @@ export class AnchorClient {
   constructor(config: AnchorClientConfig) {
     this.authUrl = config.authUrl;
     this.sep24Url = config.sep24Url;
+    this.sep12Url = config.sep12Url;
     this.networkPassphrase = config.networkPassphrase ?? Networks.TESTNET;
     this.authToken = config.authToken;
     this.maxRetries = config.maxRetries ?? DEFAULT_ANCHOR_MAX_RETRIES;
@@ -315,6 +327,121 @@ export class AnchorClient {
     return { ...tx, status: tx.status as WithdrawalStatus };
   }
 
+  /**
+   * Fetch the worker's SEP-12 KYC status from the anchor.
+   *
+   * Calls `GET {sep12Url}/customer?account={account}` and returns the raw
+   * customer record together with a normalized {@link WithdrawalKycState}
+   * so the frontend can distinguish "needs to complete KYC" from "KYC is
+   * under review" from "KYC failed" — rather than showing a generic error.
+   *
+   * The anchor's own hosted interactive flow collects the actual KYC data;
+   * this method only surfaces state (see {@link getWithdrawalKycStatus} for
+   * the combined withdrawal + KYC view).
+   *
+   * Requires `sep12Url` in the client config and an authenticated session.
+   *
+   * @param account - Public key (G…) of the worker's Stellar account.
+   * @returns The customer record with typed `state` and raw anchor status.
+   * @throws {TruvoAnchorError} If the client was constructed without `sep12Url`.
+   * @throws {TruvoAnchorApiError} If the anchor rejects the request.
+   */
+  async getCustomerKycStatus(account: string): Promise<WithdrawalKycStatus> {
+    await this.ensureAuthenticated();
+    const customer = await this.fetchCustomer(account);
+    return this.toKycStatus(customer);
+  }
+
+  /**
+   * Combined SEP-24 withdrawal + SEP-12 KYC state for the withdrawal flow.
+   *
+   * Detects when the anchor requires KYC before the withdrawal can proceed
+   * and surfaces a typed {@link WithdrawalKycState} so the frontend can show
+   * the worker an appropriate waiting or redirect state (pointing at the
+   * anchor's hosted flow) instead of a generic error:
+   *
+   * - `kyc_required` → send the worker to {@link WithdrawalKycStatus.moreInfoUrl}
+   *   (the anchor collects KYC data in its hosted flow; no custom form needed).
+   * - `kyc_pending` → show a "KYC under review" waiting state.
+   * - `kyc_approved` → the withdrawal can proceed.
+   * - `kyc_rejected` → show a KYC-failed explainer state.
+   *
+   * Requires `sep12Url` in the client config and an authenticated session.
+   *
+   * @param txId - The transaction ID from {@link initiateWithdrawal}.
+   * @param account - Public key (G…) of the worker's Stellar account.
+   * @returns Withdrawal status plus the normalized KYC state.
+   * @throws {TruvoAnchorError} If the client was constructed without `sep12Url`.
+   * @throws {TruvoAnchorApiError} If the anchor rejects either request.
+   */
+  async getWithdrawalKycStatus(
+    txId: string,
+    account: string,
+  ): Promise<WithdrawalKycStatus> {
+    await this.ensureAuthenticated();
+
+    const [withdrawal, customer] = await Promise.all([
+      this.getWithdrawalStatus(txId),
+      this.fetchCustomer(account),
+    ]);
+
+    const kyc = this.toKycStatus(customer);
+
+    // The withdrawal is blocked when the interactive flow is still
+    // incomplete and the customer is not (yet) approved by the anchor.
+    const blocked =
+      withdrawal.status === "incomplete" && kyc.state !== "kyc_approved";
+
+    return {
+      ...kyc,
+      blockingWithdrawal: blocked,
+      moreInfoUrl: withdrawal.more_info_url,
+      withdrawalStatus: withdrawal.status,
+    };
+  }
+
+  // ------------------------------------------------------------------
+  // SEP-12 private helpers
+  // ------------------------------------------------------------------
+
+  /**
+   * Call `GET {sep12Url}/customer?account={account}` and validate the shape.
+   */
+  private async fetchCustomer(account: string): Promise<Sep12CustomerResponse> {
+    if (!this.sep12Url) {
+      throw new TruvoAnchorError(
+        "sep12Url is not configured. Pass it in the AnchorClientConfig to use KYC helpers.",
+      );
+    }
+
+    const customer = await this.httpGetJson<Sep12CustomerResponse>(
+      `${this.sep12Url}/customer?account=${encodeURIComponent(account)}`,
+      "GET /sep12/customer",
+      { Authorization: `Bearer ${this.getRequiredToken()}` },
+    );
+
+    if (!customer || typeof customer.status !== "string") {
+      throw new TruvoAnchorError(
+        "Anchor returned a malformed SEP-12 customer response (missing status)",
+      );
+    }
+    return customer;
+  }
+
+  /** Normalize a validated SEP-12 customer response. */
+  private toKycStatus(customer: Sep12CustomerResponse): WithdrawalKycStatus {
+    const rawStatus = customer.status as KycStatus | string;
+    const state = kycStatusToState(rawStatus);
+    return {
+      state,
+      rawStatus,
+      customerId: customer.id,
+      missingFields: customer.fields,
+      approved: state === "kyc_approved",
+      blockingWithdrawal: state !== "kyc_approved",
+    };
+  }
+
   // ------------------------------------------------------------------
   // HTTP helpers
   // ------------------------------------------------------------------
@@ -475,4 +602,26 @@ export function isTerminalWithdrawalStatus(status: WithdrawalStatus): boolean {
     status === "expired" ||
     status === "error"
   );
+}
+
+/**
+ * Map a raw SEP-12 customer status string to the normalized
+ * {@link WithdrawalKycState} used by the withdrawal flow.
+ *
+ * Unknown statuses map to `"unknown"` rather than throwing, so new anchor
+ * statuses degrade gracefully instead of breaking the UI.
+ */
+export function kycStatusToState(rawStatus: string): WithdrawalKycState {
+  switch (rawStatus) {
+    case "ACCEPTED":
+      return "kyc_approved";
+    case "PROCESSING":
+      return "kyc_pending";
+    case "NEEDS_INFO":
+      return "kyc_required";
+    case "REJECTED":
+      return "kyc_rejected";
+    default:
+      return "unknown";
+  }
 }

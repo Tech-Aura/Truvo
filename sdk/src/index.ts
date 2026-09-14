@@ -34,12 +34,15 @@ export {
   type InitiateWithdrawalResult,
   DEFAULT_ANCHOR_MAX_RETRIES,
   isTerminalWithdrawalStatus,
+  kycStatusToState,
 } from "./anchor";
 export type {
   WithdrawalStatus,
   WithdrawalInteractiveResponse,
   WithdrawalTransaction,
   Sep24TransactionResponse,
+  WithdrawalKycState,
+  WithdrawalKycStatus,
 } from "./anchor";
 export {
   TruvoAnchorError,

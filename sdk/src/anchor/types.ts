@@ -113,6 +113,12 @@ export interface WithdrawalTransaction {
   withdraw_memo?: string;
   /** Memo type for {@link WithdrawalTransaction.withdraw_memo}. */
   withdraw_memo_type?: string;
+  /** Sender's Stellar account (included by the test anchor). */
+  from?: string;
+  /** Receiving account configured by the anchor, when present. */
+  to?: string;
+  /** Whether the transaction was refunded (included by the test anchor). */
+  refunded?: boolean;
 }
 
 /** Response body of `GET /sep24/transaction`. */
@@ -146,6 +152,10 @@ export interface KycField {
   type?: string;
   /** Per-field acceptance status (only in `provided_fields`). */
   status?: KycStatus | string;
+  /** Allowed values for choice-type fields. */
+  choices?: string[];
+  /** Whether the field may be omitted. */
+  optional?: boolean;
 }
 
 /** Response body of `GET /sep12/customer`. */
@@ -158,4 +168,57 @@ export interface Sep12CustomerResponse {
   fields?: Record<string, KycField>;
   /** Already-provided fields and their acceptance status. */
   provided_fields?: Record<string, KycField>;
+}
+
+// ============================================================================
+// KYC-aware withdrawal state
+// ============================================================================
+
+/**
+ * Normalized KYC state for the withdrawal flow, so the frontend can render
+ * a waiting/redirect state instead of a generic error.
+ *
+ * - `kyc_required`: the anchor needs more customer info — send the worker
+ *   to the anchor's hosted interactive flow (it collects KYC data there).
+ * - `kyc_pending`: KYC is under review — show a waiting state.
+ * - `kyc_approved`: the customer is validated — the flow can proceed.
+ * - `kyc_rejected`: KYC failed permanently — show an error/explainer state.
+ * - `unknown`: the anchor returned an unrecognized status.
+ */
+export type WithdrawalKycState =
+  | "kyc_required"
+  | "kyc_pending"
+  | "kyc_approved"
+  | "kyc_rejected"
+  | "unknown";
+
+/**
+ * Combined SEP-24 withdrawal + SEP-12 customer KYC state, as returned by
+ * {@link AnchorClient.getWithdrawalKycStatus} and
+ * {@link AnchorClient.getCustomerKycStatus}.
+ */
+export interface WithdrawalKycStatus {
+  /** Normalized KYC state (see {@link WithdrawalKycState}). */
+  state: WithdrawalKycState;
+  /** Raw SEP-12 status string from the anchor (e.g. `"NEEDS_INFO"`). */
+  rawStatus: string;
+  /** Customer ID assigned by the anchor, when known. */
+  customerId?: string;
+  /** Required-but-missing KYC fields (present when state is `kyc_required`). */
+  missingFields?: Record<string, KycField>;
+  /** Convenience flag: `true` only when `state === "kyc_approved"`. */
+  approved: boolean;
+  /**
+   * `true` when the withdrawal is currently blocked waiting on KYC
+   * (the SEP-24 transaction is still `incomplete` and the customer is
+   * not approved). The frontend should show a waiting/redirect state.
+   */
+  blockingWithdrawal: boolean;
+  /**
+   * Anchor-hosted page for the withdrawal (from the SEP-24 transaction's
+   * `more_info_url`). Use as the redirect target when KYC is required.
+   */
+  moreInfoUrl?: string;
+  /** SEP-24 status of the withdrawal at the time of the check. */
+  withdrawalStatus?: WithdrawalStatus;
 }
