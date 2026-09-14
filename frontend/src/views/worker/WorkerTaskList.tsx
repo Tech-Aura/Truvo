@@ -4,14 +4,16 @@
  * Displays tasks assigned to the connected worker's address.
  * Shows task details (task_id, payer, amount, deadline, status), provides
  * filtering and clear visual distinctions between tasks awaiting worker action
- * (Created) versus completed/released tasks, and provides the completion-proof
- * submission flow.
+ * (Created) versus completed/released tasks, provides the completion-proof
+ * submission flow, and provides the withdraw-to-local-currency flow.
  */
 
 import { useEffect, useMemo, useState } from "react";
 import { EscrowTask, TaskStatus } from "../../types/task";
 import { getMockWorkerTasks } from "./mockTasks";
 import { SubmitProofModal } from "./SubmitProofModal";
+import { WithdrawModal } from "./WithdrawModal";
+import { estimateLocalValue } from "./withdrawalUtils";
 
 /** Status display metadata matching contract codes. */
 const STATUS_META: Record<TaskStatus, { label: string; badgeClass: string }> = {
@@ -60,6 +62,11 @@ interface WorkerTaskListProps {
   /** Connected worker wallet address. */
   workerAddress?: string | null;
   /**
+   * Placeholder balance for worker's wallet in XLM.
+   * Defaults to sum of released tasks if not explicitly provided.
+   */
+  placeholderBalance?: string;
+  /**
    * Placeholder submit handler for proof submission. Real SDK call
    * (TruvoClient.confirmTask) replaces this in a later branch.
    */
@@ -68,11 +75,21 @@ interface WorkerTaskListProps {
     proofHash: string,
     description: string,
   ) => void;
+  /**
+   * Placeholder handler for initiating anchor withdrawal. Real SDK call
+   * (AnchorClient.initiateWithdrawal) replaces this in a later branch.
+   */
+  onInitiateWithdrawalPlaceholder?: (
+    assetCode: string,
+    amount: string,
+    account: string,
+  ) => { transactionId: string; interactiveUrl: string };
 }
 
 export function WorkerTaskList({
   tasks: customTasks,
   workerAddress,
+  placeholderBalance: customBalance,
   onSubmitProofPlaceholder = (taskId, proofHash, description) => {
     console.log(
       "[placeholder] TruvoClient.confirmTask would be called with:",
@@ -87,6 +104,7 @@ export function WorkerTaskList({
       ),
     );
   },
+  onInitiateWithdrawalPlaceholder,
 }: WorkerTaskListProps) {
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [taskList, setTaskList] = useState<EscrowTask[]>(() => {
@@ -94,6 +112,9 @@ export function WorkerTaskList({
   });
   const [selectedTaskForProof, setSelectedTaskForProof] =
     useState<EscrowTask | null>(null);
+  const [selectedTaskForWithdraw, setSelectedTaskForWithdraw] =
+    useState<EscrowTask | null>(null);
+  const [isWithdrawModalOpen, setIsWithdrawModalOpen] = useState(false);
   const [successNotice, setSuccessNotice] = useState<{
     taskId: string;
     proofHash: string;
@@ -114,6 +135,21 @@ export function WorkerTaskList({
     [taskList],
   );
 
+  // Compute spendable wallet balance from released tasks
+  const walletBalance = useMemo(() => {
+    if (customBalance !== undefined) return customBalance;
+    const sum = taskList
+      .filter((t) => t.status === TaskStatus.Released)
+      .reduce((acc, t) => acc + (parseFloat(t.amount) || 0), 0);
+    return sum.toFixed(2);
+  }, [taskList, customBalance]);
+
+  const balanceEstimate = useMemo(() => {
+    return estimateLocalValue(walletBalance, "NGN");
+  }, [walletBalance]);
+
+  const hasReleasedFunds = parseFloat(walletBalance) > 0;
+
   const filteredTasks = useMemo(() => {
     switch (filter) {
       case "awaiting_action":
@@ -130,10 +166,8 @@ export function WorkerTaskList({
     proofHash: string,
     description: string,
   ) => {
-    // 1. Call placeholder handler (logs to console; wired to SDK in later branch)
     onSubmitProofPlaceholder(taskId, proofHash, description);
 
-    // 2. Update local state to transition task to Confirmed status
     setTaskList((prev) =>
       prev.map((task) =>
         task.task_id === taskId
@@ -142,9 +176,18 @@ export function WorkerTaskList({
       ),
     );
 
-    // 3. Set success banner and close modal
     setSuccessNotice({ taskId, proofHash });
     setSelectedTaskForProof(null);
+  };
+
+  const handleOpenWithdrawForTask = (task: EscrowTask) => {
+    setSelectedTaskForWithdraw(task);
+    setIsWithdrawModalOpen(true);
+  };
+
+  const handleOpenGeneralWithdraw = () => {
+    setSelectedTaskForWithdraw(null);
+    setIsWithdrawModalOpen(true);
   };
 
   if (taskList.length === 0) {
@@ -158,6 +201,34 @@ export function WorkerTaskList({
 
   return (
     <div className="worker-task-list">
+      {/* Worker Earnings & Local Currency Off-Ramp Banner (visible when funds are released) */}
+      {hasReleasedFunds && (
+        <div className="worker-earnings-card">
+          <div className="earnings-info">
+            <div className="earnings-header-row">
+              <span className="earnings-label">Available Wallet Balance</span>
+              <span className="badge-anchor-sep24">SEP-24 Off-Ramp</span>
+            </div>
+            <div className="earnings-values">
+              <span className="earnings-amount">{walletBalance} XLM</span>
+              <span className="earnings-estimate">
+                ≈ {balanceEstimate.formatted}
+              </span>
+            </div>
+            <p className="earnings-subtext">
+              Funds from completed and released escrows are in your Stellar wallet.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn-primary btn-withdraw-action"
+            onClick={handleOpenGeneralWithdraw}
+          >
+            Withdraw to Local Currency
+          </button>
+        </div>
+      )}
+
       <div className="worker-task-header">
         <div>
           <h3>Assigned Tasks</h3>
@@ -289,9 +360,19 @@ export function WorkerTaskList({
                         </span>
                       )}
                       {task.status === TaskStatus.Released && (
-                        <span className="action-pill pill-completed">
-                          Released
-                        </span>
+                        <div className="action-released-group">
+                          <span className="action-pill pill-completed">
+                            Released
+                          </span>
+                          <button
+                            type="button"
+                            className="btn-action success-sm"
+                            onClick={() => handleOpenWithdrawForTask(task)}
+                            title="Withdraw funds for this released task to local currency"
+                          >
+                            Withdraw
+                          </button>
+                        </div>
                       )}
                       {task.status === TaskStatus.Refunded && (
                         <span className="action-pill pill-neutral">
@@ -322,6 +403,20 @@ export function WorkerTaskList({
           task={selectedTaskForProof}
           onClose={() => setSelectedTaskForProof(null)}
           onSubmit={handleProofSubmit}
+        />
+      )}
+
+      {/* Withdraw to Local Currency Modal */}
+      {isWithdrawModalOpen && (
+        <WithdrawModal
+          workerAddress={workerAddress || "GBWORKERMOCKADDRESS1111111111111111111111111111111111111111"}
+          defaultAmount={selectedTaskForWithdraw?.amount || walletBalance}
+          availableBalance={walletBalance}
+          onClose={() => {
+            setIsWithdrawModalOpen(false);
+            setSelectedTaskForWithdraw(null);
+          }}
+          onInitiateWithdrawalPlaceholder={onInitiateWithdrawalPlaceholder}
         />
       )}
     </div>
