@@ -103,6 +103,19 @@ export type ReleaseFundsResult =
     }
   | { ok: false; error: string; txHash?: string };
 
+/** Result type for {@link TruvoClient.refundExpired}. */
+export type RefundExpiredResult =
+  | {
+      ok: true;
+      task: Task;
+      txHash: string;
+      /** Payer address that received the refund (from the contract event). */
+      payer: string;
+      /** Amount refunded (from the contract event). */
+      amount: string;
+    }
+  | { ok: false; error: string; txHash?: string };
+
 // ============================================================================
 // XDR helpers
 // ============================================================================
@@ -470,6 +483,101 @@ export class TruvoClient {
         error: err instanceof Error ? err.message : String(err),
       };
     }
+  }
+
+  // ------------------------------------------------------------------
+  // refundExpired
+  // ------------------------------------------------------------------
+
+  /**
+   * Refund escrowed funds back to the payer if the deadline has passed.
+   *
+   * Wraps the contract's `refund_if_expired` function. The task must
+   * still be in `Created` status and the current ledger timestamp must
+   * be past the stored `deadline`. No Soroban `require_auth` is needed.
+   *
+   * Use {@link TruvoClient.isTaskExpired} to check client-side whether
+   * the deadline has passed before submitting this transaction.
+   *
+   * @param input - Contains `taskId` (32-byte hex string).
+   * @returns A typed result containing the updated {@link Task} plus
+   *   event-derived `payer` and `amount` on success.
+   */
+  async refundExpired(
+    input: RefundExpiredInput,
+  ): Promise<RefundExpiredResult> {
+    try {
+      const contract = new Contract(this.contractId);
+      const sourceAccount = await this.server.getAccount(
+        this.keypair.publicKey(),
+      );
+
+      const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
+        .setNetworkPassphrase(this.networkPassphrase)
+        .setTimeout(30)
+        .addOperation(
+          contract.call("refund_if_expired", hex32ToScVal(input.taskId)),
+        )
+        .build();
+
+      const preparedTx = await this.server.prepareTransaction(tx);
+      preparedTx.sign(this.keypair);
+
+      const sendResult = await this.server.sendTransaction(preparedTx);
+
+      if (sendResult.status === "ERROR") {
+        return {
+          ok: false,
+          error:
+            sendResult.errorResult?.toString() ?? "Transaction submission error",
+          txHash: sendResult.hash,
+        };
+      }
+
+      const meta = await this.waitForTransactionGetMeta(sendResult.hash);
+      const task = await this.readTask(input.taskId);
+
+      // Parse the `task_refunded` event for authoritative refund details.
+      // Event data: (task_id, payer, amount)
+      let payer = task.payer;
+      let amount = task.amount;
+
+      const eventData = meta ? findContractEvent(meta, "task_refunded") : null;
+      if (eventData) {
+        const eventVec = eventData.vec();
+        if (eventVec && eventVec.length >= 3) {
+          payer = scValToAddress(eventVec[1]);
+          amount = scValToI128(eventVec[2]);
+        }
+      }
+
+      return { ok: true, task, txHash: sendResult.hash, payer, amount };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // isTaskExpired
+  // ------------------------------------------------------------------
+
+  /**
+   * Client-side check: has the task's deadline passed?
+   *
+   * The contract compares `env.ledger().timestamp()` (seconds since epoch)
+   * against the stored `deadline`. This helper mirrors that logic using
+   * `Date.now()` so consumers can decide whether to attempt a
+   * {@link refundExpired} call before actually submitting a transaction.
+   *
+   * @param task - The {@link Task} to check.
+   * @returns `true` if the current time (seconds) exceeds the task's deadline.
+   */
+  static isTaskExpired(task: Task): boolean {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    return nowSeconds > task.deadline;
   }
 
   // ------------------------------------------------------------------

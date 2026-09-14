@@ -19,6 +19,7 @@ export {
   type ResolveDisputeInput,
   type TruvoResult,
   type ReleaseFundsResult,
+  type RefundExpiredResult,
 } from "./client";
 
 export const SDK_VERSION = "0.1.0";
