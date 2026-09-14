@@ -8,5 +8,18 @@
  */
 
 export { TaskStatus, type Task, type DisputeOutcome } from "./types";
+export {
+  TruvoClient,
+  type TruvoClientConfig,
+  type CreateEscrowInput,
+  type ConfirmTaskInput,
+  type ReleaseFundsInput,
+  type RefundExpiredInput,
+  type RaiseDisputeInput,
+  type ResolveDisputeInput,
+  type TruvoResult,
+  type ReleaseFundsResult,
+  type RefundExpiredResult,
+} from "./client";
 
 export const SDK_VERSION = "0.1.0";
