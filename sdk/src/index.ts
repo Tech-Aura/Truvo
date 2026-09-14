@@ -12,6 +12,7 @@ export {
   TruvoClient,
   type TruvoClientConfig,
   type CreateEscrowInput,
+  type ConfirmTaskInput,
   type TruvoResult,
 } from "./client";
 

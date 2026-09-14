@@ -49,6 +49,14 @@ export interface CreateEscrowInput {
   deadline: number;
 }
 
+/** Input for {@link TruvoClient.confirmTask}. */
+export interface ConfirmTaskInput {
+  /** 32-byte task identifier as a 64-character hex string. */
+  taskId: string;
+  /** 32-byte proof hash as a 64-character hex string. */
+  proofHash: string;
+}
+
 /** Typed result returned by most SDK methods. */
 export type TruvoResult =
   | { ok: true; task: Task; txHash: string }
@@ -274,6 +282,70 @@ export class TruvoClient {
 
       // Read the newly created task from contract storage so we return
       // the authoritative on-chain state.
+      const task = await this.readTask(input.taskId);
+
+      return { ok: true, task, txHash: sendResult.hash };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // confirmTask
+  // ------------------------------------------------------------------
+
+  /**
+   * Confirm that the worker has completed the task.
+   *
+   * Wraps the contract's `confirm_completion` function. The transaction
+   * must be signed by the **worker** assigned to this task (enforced by
+   * Soroban `require_auth`).
+   *
+   * If the configured signing key does not match the assigned worker,
+   * the contract rejects the transaction and this method returns a
+   * descriptive error.
+   *
+   * @param input - Contains `taskId` and `proofHash` (32-byte hex strings).
+   * @returns A typed result containing the updated {@link Task} on success.
+   */
+  async confirmTask(input: ConfirmTaskInput): Promise<TruvoResult> {
+    try {
+      const contract = new Contract(this.contractId);
+      const sourceAccount = await this.server.getAccount(
+        this.keypair.publicKey(),
+      );
+
+      const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
+        .setNetworkPassphrase(this.networkPassphrase)
+        .setTimeout(30)
+        .addOperation(
+          contract.call(
+            "confirm_completion",
+            hex32ToScVal(input.taskId),
+            hex32ToScVal(input.proofHash),
+          ),
+        )
+        .build();
+
+      const preparedTx = await this.server.prepareTransaction(tx);
+      preparedTx.sign(this.keypair);
+
+      const sendResult = await this.server.sendTransaction(preparedTx);
+
+      if (sendResult.status === "ERROR") {
+        return {
+          ok: false,
+          error:
+            sendResult.errorResult?.toString() ?? "Transaction submission error",
+          txHash: sendResult.hash,
+        };
+      }
+
+      await this.waitForTransaction(sendResult.hash);
+
       const task = await this.readTask(input.taskId);
 
       return { ok: true, task, txHash: sendResult.hash };
