@@ -111,3 +111,177 @@
   font-size: 0.9rem;
   word-break: break-all;
 }
+
+/* Create-task form */
+.task-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 480px;
+  padding: 1.25rem;
+  border: 1px solid #1a1f2e;
+  border-radius: 12px;
+  background-color: #141926;
+}
+
+.task-form h3 {
+  margin: 0 0 0.25rem;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.form-field label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.form-field input {
+  border-radius: 8px;
+  border: 1px solid #2a3040;
+  background-color: #10141c;
+  color: inherit;
+  padding: 0.55em 0.8em;
+  font-size: 0.9rem;
+  font-family: inherit;
+}
+
+.form-field input:focus {
+  outline: none;
+  border-color: #7aa2f7;
+}
+
+.form-field input[aria-invalid="true"] {
+  border-color: #f7768e;
+}
+
+.field-error {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #f7768e;
+}
+
+.field-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.task-form button.primary {
+  background-color: #7aa2f7;
+  color: #10141c;
+  font-weight: 600;
+  border: none;
+  align-self: flex-start;
+}
+
+.task-form button.primary:hover {
+  background-color: #89b4fa;
+}
+
+.submit-note {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #9ece6a;
+}
+
+/* Escrow status list */
+.escrow-list {
+  margin-top: 2rem;
+}
+
+.escrow-list h3 {
+  margin: 0 0 0.75rem;
+}
+
+.table-scroll {
+  overflow-x: auto;
+  border: 1px solid #1a1f2e;
+  border-radius: 12px;
+  background-color: #141926;
+}
+
+.escrow-list table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.escrow-list th,
+.escrow-list td {
+  text-align: left;
+  padding: 0.65em 0.9em;
+  border-bottom: 1px solid #1a1f2e;
+  white-space: nowrap;
+}
+
+.escrow-list th {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.escrow-list tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.escrow-list tbody tr:hover {
+  background-color: #1a2030;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.82rem;
+}
+
+.table-note {
+  margin-top: 0.5rem;
+}
+
+/* Status badges — one color per task status */
+.status-badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-radius: 999px;
+  padding: 0.2em 0.75em;
+  border: 1px solid;
+}
+
+.status-created {
+  color: #7aa2f7;
+  border-color: #7aa2f7;
+  background-color: rgba(122, 162, 247, 0.12);
+}
+
+.status-confirmed {
+  color: #e0af68;
+  border-color: #e0af68;
+  background-color: rgba(224, 175, 104, 0.12);
+}
+
+.status-released {
+  color: #9ece6a;
+  border-color: #9ece6a;
+  background-color: rgba(158, 206, 106, 0.12);
+}
+
+.status-refunded {
+  color: #bb9af7;
+  border-color: #bb9af7;
+  background-color: rgba(187, 154, 247, 0.12);
+}
+
+.status-disputed {
+  color: #f7768e;
+  border-color: #f7768e;
+  background-color: rgba(247, 118, 142, 0.12);
+}

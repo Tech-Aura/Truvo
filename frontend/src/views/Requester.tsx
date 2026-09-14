@@ -1,30 +1,38 @@
 /**
- * Requester view (placeholder).
+ * Requester view.
  *
- * Scaffold only — escrow creation UI will be built on a later branch.
+ * Hosts the create-task form and the escrow status list. Both currently
+ * use placeholder handlers/mock data; SDK wiring happens in a later branch.
  */
 
 import { useWallet } from "../wallet/WalletContext";
+import { CreateTaskForm } from "./requester/CreateTaskForm";
+import { EscrowStatusList } from "./requester/EscrowStatusList";
 
 export default function Requester() {
   const { isConnected, publicKey } = useWallet();
 
+  if (!isConnected) {
+    return (
+      <section className="view">
+        <h2>Requester</h2>
+        <p>Create tasks and fund escrows.</p>
+        <p className="hint">
+          Connect your Freighter wallet (top right) to create a task and see
+          your escrows.
+        </p>
+      </section>
+    );
+  }
+
   return (
     <section className="view">
       <h2>Requester</h2>
-      <p>
-        Create tasks and fund escrows. The task creation UI is not built yet —
-        this is a scaffold.
+      <p className="hint">
+        Connected as <code>{publicKey}</code>
       </p>
-      {!isConnected ? (
-        <p className="hint">
-          Connect your Freighter wallet (top right) to get started.
-        </p>
-      ) : (
-        <p className="hint">
-          Connected as <code>{publicKey}</code>
-        </p>
-      )}
+      <CreateTaskForm />
+      <EscrowStatusList />
     </section>
   );
 }
