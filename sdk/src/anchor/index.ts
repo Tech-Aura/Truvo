@@ -14,6 +14,7 @@ export {
   type InitiateWithdrawalResult,
   DEFAULT_ANCHOR_MAX_RETRIES,
   DEFAULT_HORIZON_URL,
+  DEFAULT_QUOTE_URL,
   isTerminalWithdrawalStatus,
   kycStatusToState,
 } from "./client";
@@ -38,4 +39,7 @@ export type {
   WithdrawalKycStatus,
   AssetBalance,
   AvailableBalance,
+  OraclePrice,
+  Sep38PricesResponse,
+  LocalValueEstimate,
 } from "./types";

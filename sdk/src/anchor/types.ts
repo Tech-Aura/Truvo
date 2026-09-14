@@ -219,6 +219,56 @@ export interface AvailableBalance {
 }
 
 // ============================================================================
+// Price oracle (SEP-38) — currency conversion estimates
+// ============================================================================
+
+/** A candidate price for one (buy) asset, from the SEP-38 `GET /prices` response. */
+export interface OraclePrice {
+  /** The buy asset in SEP-38 Asset Identification Format (e.g. `"iso4217:USD"`). */
+  asset: string;
+  /**
+   * Amount of the buy asset per **one** unit of the sell asset, as a
+   * decimal string (e.g. `"0.39"` means 1 XLM ≈ 0.39 USD on the test oracle).
+   */
+  price: string;
+  /** Decimal precision the oracle recommends for the price. */
+  decimals: number;
+}
+
+/** Response of the SEP-38 `GET /prices` endpoint. */
+export interface Sep38PricesResponse {
+  buy_assets: OraclePrice[];
+}
+
+/** Result of {@link AnchorClient.estimateLocalValue}. */
+export interface LocalValueEstimate {
+  /** Estimated value in the target currency, as a decimal string. **Estimate only.** */
+  estimate: string;
+  /** Requested amount (echoed from the input). */
+  amount: string;
+  /** Asset code that was estimated (echoed; `"native"` is surfaced as `"XLM"`). */
+  assetCode: string;
+  /** Target fiat currency code (echoed, e.g. `"USD"`). */
+  targetCurrency: string;
+  /**
+   * Oracle price used: buy-asset units per one unit of `assetCode`.
+   * **Estimate only — not a guaranteed rate.**
+   */
+  price: string;
+  /** Buy asset string the oracle returned (e.g. `"iso4217:USD"`). */
+  buyAsset: string;
+  /** Sell asset string sent to the oracle (e.g. `"stellar:native"`). */
+  sellAsset: string;
+  /** Decimal precision of the oracle's price. */
+  decimals: number;
+  /**
+   * Short human-readable summary of the estimate (e.g. `"~3.90 USD"`),
+   * rounded to two decimal places.
+   */
+  display: string;
+}
+
+// ============================================================================
 // KYC-aware withdrawal state
 // ============================================================================
 

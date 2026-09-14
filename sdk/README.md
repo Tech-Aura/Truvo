@@ -366,6 +366,24 @@ if (!srt.found) {
 
 `balance.balances` contains every asset the account holds, useful for wallet-style UIs. The anchor enforces its own min/max per transaction (1–10 units on the test anchor) — this helper only reports on-chain availability.
 
+### Currency conversion estimate (price oracle)
+
+Give the worker a rough local-currency preview of their balance before withdrawing. Estimates come from the anchor's SEP-38 quote server (the chosen testnet-accessible price oracle — see `/docs/anchor-integration.md` for rationale):
+
+```typescript
+// 10 XLM ≈ how much USD?
+const est = await anchor.estimateLocalValue("10", "XLM", "USD");
+console.log(est.display);   // e.g. "~3.90 USD"
+console.log(est.estimate);  // e.g. "3.9000039"
+
+// An issued asset (issuer required):
+const srt = await anchor.estimateLocalValue("5", "SRT", "USD", {
+  assetIssuer: SRT_ISSUER,
+});
+```
+
+⚠️ **Estimate only — not a guaranteed rate.** The anchor's own interactive flow determines the final rate at withdrawal time; actual proceeds will differ (fees, spread, price movement).
+
 ## Running Tests
 
 ```bash

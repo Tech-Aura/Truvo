@@ -21,10 +21,13 @@ import type {
   AssetBalance,
   AvailableBalance,
   KycStatus,
+  LocalValueEstimate,
+  OraclePrice,
   Sep10ChallengeResponse,
   Sep10TokenResponse,
   Sep12CustomerResponse,
   Sep24TransactionResponse,
+  Sep38PricesResponse,
   WithdrawalInteractiveResponse,
   WithdrawalKycState,
   WithdrawalKycStatus,
@@ -53,6 +56,12 @@ export interface AnchorClientConfig {
    * (defaults to `"https://horizon-testnet.stellar.org"`).
    */
   horizonUrl?: string;
+  /**
+   * SEP-38 anchor quote server base URL, used as the price oracle for
+   * currency conversion estimates (defaults to the test anchor's quote
+   * server, `"https://testanchor.stellar.org/sep38"`).
+   */
+  quoteUrl?: string;
   /** Network passphrase the anchor operates on (defaults to testnet). */
   networkPassphrase?: string;
   /**
@@ -131,6 +140,7 @@ export class AnchorClient {
   private readonly sep24Url: string;
   private readonly sep12Url: string | undefined;
   private readonly horizonUrl: string;
+  private readonly quoteUrl: string;
   private readonly networkPassphrase: string;
   private readonly maxRetries: number;
 
@@ -144,6 +154,7 @@ export class AnchorClient {
     this.sep24Url = config.sep24Url;
     this.sep12Url = config.sep12Url;
     this.horizonUrl = config.horizonUrl ?? DEFAULT_HORIZON_URL;
+    this.quoteUrl = config.quoteUrl ?? DEFAULT_QUOTE_URL;
     this.networkPassphrase = config.networkPassphrase ?? Networks.TESTNET;
     this.authToken = config.authToken;
     this.maxRetries = config.maxRetries ?? DEFAULT_ANCHOR_MAX_RETRIES;
@@ -501,6 +512,73 @@ export class AnchorClient {
     };
   }
 
+  /**
+   * Estimate the local-currency value of an amount via a price oracle.
+   *
+   * Queries the anchor's SEP-38 quote server (`GET /prices`) — a Stellar
+   * testnet-accessible oracle (see `/docs/anchor-integration.md` for the
+   * choice rationale) — and returns a **rough estimate** of what the
+   * amount is worth in `targetCurrency`, so the worker can preview their
+   * balance before withdrawing.
+   *
+   * **This is an estimate only, not a guaranteed rate.** The anchor's own
+   * interactive flow determines the final rate at withdrawal time; actual
+   * proceeds will differ (fees, spread, price movement).
+   *
+   * @param amount - Amount to convert, as a decimal string (e.g. `"10"`).
+   * @param assetCode - Asset of the amount: `"XLM"` (default) for the
+   *   native asset, or an issued code such as `"SRT"` / `"USDC"`.
+   * @param targetCurrency - ISO-4217 fiat currency code (e.g. `"USD"`,
+   *   `"CAD"` — must be supported by the oracle, see `GET /sep38/info`).
+   * @param options - Optional `assetIssuer` (required for issued assets
+   *   when building the SEP-38 sell asset string).
+   * @returns A {@link LocalValueEstimate} with the estimate and metadata.
+   * @throws {TruvoAnchorApiError} If the oracle is unreachable or returns
+   *   a non-2xx response (transient 5xx responses are retried).
+   * @throws {TruvoAnchorError} If the oracle does not list a price for the
+   *   requested asset pair.
+   */
+  async estimateLocalValue(
+    amount: string,
+    assetCode = "XLM",
+    targetCurrency = "USD",
+    options?: { assetIssuer?: string },
+  ): Promise<LocalValueEstimate> {
+    const sellAsset = buildSep38StellarAsset(assetCode, options?.assetIssuer);
+    const buyAsset = `iso4217:${targetCurrency.toUpperCase()}`;
+
+    const url =
+      `${this.quoteUrl}/prices?sell_asset=${encodeURIComponent(sellAsset)}` +
+      `&sell_amount=${encodeURIComponent(amount)}` +
+      `&buy_asset=${encodeURIComponent(buyAsset)}`;
+
+    const response = await this.httpGetJson<Sep38PricesResponse>(
+      url,
+      "GET /sep38/prices",
+    );
+
+    const priceEntry = response?.buy_assets?.find((p) => p.asset === buyAsset);
+    if (!priceEntry || typeof priceEntry.price !== "string") {
+      throw new TruvoAnchorError(
+        `Price oracle returned no ${buyAsset} price for ${sellAsset} — ` +
+          `the currency may be unsupported (see GET ${this.quoteUrl}/info)`,
+      );
+    }
+
+    const estimate = multiplyDecimalStrings(amount, priceEntry.price);
+    return {
+      estimate,
+      amount,
+      assetCode: normalizeAssetCode(assetCode),
+      targetCurrency: targetCurrency.toUpperCase(),
+      price: priceEntry.price,
+      buyAsset,
+      sellAsset,
+      decimals: priceEntry.decimals ?? 4,
+      display: `~${roundToDecimalPlaces(estimate, 2)} ${targetCurrency.toUpperCase()}`,
+    };
+  }
+
   // ------------------------------------------------------------------
   // SEP-12 private helpers
   // ------------------------------------------------------------------
@@ -676,12 +754,75 @@ export const DEFAULT_ANCHOR_MAX_RETRIES = 3;
 /** Default Horizon endpoint used for on-chain balance queries (testnet). */
 export const DEFAULT_HORIZON_URL = "https://horizon-testnet.stellar.org";
 
+/** Default SEP-38 quote server used as the price oracle (test anchor). */
+export const DEFAULT_QUOTE_URL = "https://testanchor.stellar.org/sep38";
+
 /**
  * Normalizes an asset code for display: the Horizon native balance uses
  * asset_type `"native"`, which we surface as `"XLM"`.
  */
 function normalizeAssetCode(code: string): string {
   return code === "native" ? "XLM" : code;
+}
+
+/**
+ * Build a SEP-38 Asset Identification Format string for a Stellar asset.
+ *
+ * - Native XLM → `stellar:native`
+ * - Issued asset → `stellar:<CODE>:<ISSUER>` (issuer required)
+ */
+function buildSep38StellarAsset(assetCode: string, assetIssuer?: string): string {
+  const code = assetCode === "XLM" ? "native" : assetCode;
+  if (code === "native") return "stellar:native";
+  if (!assetIssuer) {
+    throw new TruvoAnchorError(
+      `assetIssuer is required to build the SEP-38 sell asset for "${assetCode}"`,
+    );
+  }
+  return `stellar:${code}:${assetIssuer}`;
+}
+
+/**
+ * Multiply two decimal strings without floating point error, using BigInt
+ * arithmetic: each operand is scaled by its own decimal digit count, the
+ * integers are multiplied, and the result is re-scaled by the sum.
+ */
+function multiplyDecimalStrings(a: string, b: string): string {
+  const scaleA = (a.split(".")[1] ?? "").length;
+  const scaleB = (b.split(".")[1] ?? "").length;
+  const toUnits = (s: string): bigint => {
+    const [int, frac = ""] = s.split(".");
+    return BigInt(int + frac);
+  };
+  const product = toUnits(a) * toUnits(b);
+  const scale = scaleA + scaleB;
+  return scale === 0 ? product.toString() : formatScaledBigInt(product, scale);
+}
+
+/**
+ * Round a decimal string to `places` decimal places (half-up), returning
+ * a decimal string. Used for human-readable estimate display.
+ */
+function roundToDecimalPlaces(value: string, places: number): string {
+  const [int, frac = ""] = value.split(".");
+  if (frac.length <= places) return `${int}.${frac.padEnd(places, "0")}`;
+  const keep = frac.slice(0, places);
+  const rest = frac.slice(places);
+  const roundUp = rest.length > 0 && Number(rest[0]) >= 5;
+  let keptInt = BigInt(int + keep);
+  if (roundUp) keptInt += 1n;
+  const out = keptInt.toString().padStart(places + 1, "0");
+  const cut = places === 0 ? out.length : out.length - places;
+  return places === 0 ? out : `${out.slice(0, cut)}.${out.slice(cut)}`;
+}
+
+/** Format a BigInt scaled by `scale` decimal digits as a decimal string. */
+function formatScaledBigInt(value: bigint, scale: number): string {
+  const negative = value < 0n;
+  const abs = negative ? -value : value;
+  const int = abs / BigInt(10 ** scale);
+  const frac = (abs % BigInt(10 ** scale)).toString().padStart(scale, "0");
+  return `${negative ? "-" : ""}${int}.${frac}`;
 }
 
 /**
