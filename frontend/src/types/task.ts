@@ -15,3 +15,17 @@ export enum TaskStatus {
   Refunded = 3,
   Disputed = 4,
 }
+
+/** Task shape matching the SDK's Task type. */
+export interface EscrowTask {
+  task_id: string;
+  payer: string;
+  worker: string;
+  /** Escrowed amount (decimal string on-chain; XLM here for display). */
+  amount: string;
+  /** Ledger timestamp after which the task can be refunded. */
+  deadline: number;
+  status: TaskStatus;
+  /** 32-byte hex proof hash (empty until the worker confirms). */
+  proof_hash: string;
+}
