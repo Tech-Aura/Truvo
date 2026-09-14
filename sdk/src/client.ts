@@ -15,6 +15,12 @@ import {
   BASE_FEE,
 } from "@stellar/stellar-sdk";
 import { Task, TaskStatus, DisputeOutcome } from "./types";
+import {
+  TruvoError,
+  TruvoNetworkError,
+  TruvoContractError,
+} from "./errors";
+import { retryWithBackoff, DEFAULT_MAX_RETRIES } from "./retry";
 
 type ApiGetTxStatus = typeof SorobanRpc.Api.GetTransactionStatus;
 type ApiFailedTx = SorobanRpc.Api.GetFailedTransactionResponse;
@@ -33,6 +39,12 @@ export interface TruvoClientConfig {
   networkPassphrase: string;
   /** Secret key of the signing account. */
   secretKey: string;
+  /**
+   * Maximum number of retry attempts for transient network errors
+   * (timeouts, RPC unavailability). Defaults to 3. Set to 0 to disable
+   * automatic retries.
+   */
+  maxRetries?: number;
 }
 
 /** Input for {@link TruvoClient.createEscrow}. */
@@ -86,35 +98,27 @@ export interface ResolveDisputeInput {
 }
 
 /** Typed result returned by most SDK methods. */
-export type TruvoResult =
-  | { ok: true; task: Task; txHash: string }
-  | { ok: false; error: string; txHash?: string };
+export type TruvoResult = { task: Task; txHash: string };
 
 /** Result type for {@link TruvoClient.releaseFunds}. */
-export type ReleaseFundsResult =
-  | {
-      ok: true;
-      task: Task;
-      txHash: string;
-      /** Worker address that received the funds (from the contract event). */
-      worker: string;
-      /** Amount released (from the contract event). */
-      amount: string;
-    }
-  | { ok: false; error: string; txHash?: string };
+export type ReleaseFundsResult = {
+  task: Task;
+  txHash: string;
+  /** Worker address that received the funds (from the contract event). */
+  worker: string;
+  /** Amount released (from the contract event). */
+  amount: string;
+};
 
 /** Result type for {@link TruvoClient.refundExpired}. */
-export type RefundExpiredResult =
-  | {
-      ok: true;
-      task: Task;
-      txHash: string;
-      /** Payer address that received the refund (from the contract event). */
-      payer: string;
-      /** Amount refunded (from the contract event). */
-      amount: string;
-    }
-  | { ok: false; error: string; txHash?: string };
+export type RefundExpiredResult = {
+  task: Task;
+  txHash: string;
+  /** Payer address that received the refund (from the contract event). */
+  payer: string;
+  /** Amount refunded (from the contract event). */
+  amount: string;
+};
 
 // ============================================================================
 // XDR helpers
@@ -268,12 +272,14 @@ export class TruvoClient {
   private readonly contractId: string;
   private readonly networkPassphrase: string;
   private readonly keypair: Keypair;
+  private readonly maxRetries: number;
 
   constructor(config: TruvoClientConfig) {
     this.server = new SorobanRpc.Server(config.rpcUrl);
     this.contractId = config.contractId;
     this.networkPassphrase = config.networkPassphrase;
     this.keypair = Keypair.fromSecret(config.secretKey);
+    this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
   }
 
   /** The public key (G…) of the configured signing account. */
@@ -297,54 +303,59 @@ export class TruvoClient {
    *   or a descriptive error string on failure.
    */
   async createEscrow(input: CreateEscrowInput): Promise<TruvoResult> {
-    try {
-      const contract = new Contract(this.contractId);
-      const sourceAccount = await this.server.getAccount(
-        this.keypair.publicKey(),
+    const contract = new Contract(this.contractId);
+
+    // Network calls that may fail transiently — wrapped with retry.
+    const sourceAccount = await retryWithBackoff(
+      () => this.server.getAccount(this.keypair.publicKey()),
+      "getAccount",
+      this.maxRetries,
+    );
+
+    const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
+      .setNetworkPassphrase(this.networkPassphrase)
+      .setTimeout(30)
+      .addOperation(
+        contract.call(
+          "create_task",
+          new Address(input.payer).toScVal(),
+          new Address(input.worker).toScVal(),
+          i128ToScVal(input.amount),
+          hex32ToScVal(input.taskId),
+          u64ToScVal(input.deadline),
+        ),
+      )
+      .build();
+
+    const preparedTx = await retryWithBackoff(
+      () => this.server.prepareTransaction(tx),
+      "prepareTransaction",
+      this.maxRetries,
+    );
+    preparedTx.sign(this.keypair);
+
+    const sendResult = await retryWithBackoff(
+      () => this.server.sendTransaction(preparedTx),
+      "sendTransaction",
+      this.maxRetries,
+    );
+
+    if (sendResult.status === "ERROR") {
+      const errMsg = sendResult.errorResult?.toString() ?? "Transaction submission error";
+      throw new TruvoContractError(
+        `createEscrow failed: ${errMsg}`,
+        errMsg,
+        sendResult.hash,
       );
-
-      const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
-        .setNetworkPassphrase(this.networkPassphrase)
-        .setTimeout(30)
-        .addOperation(
-          contract.call(
-            "create_task",
-            new Address(input.payer).toScVal(),
-            new Address(input.worker).toScVal(),
-            i128ToScVal(input.amount),
-            hex32ToScVal(input.taskId),
-            u64ToScVal(input.deadline),
-          ),
-        )
-        .build();
-
-      const preparedTx = await this.server.prepareTransaction(tx);
-      preparedTx.sign(this.keypair);
-
-      const sendResult = await this.server.sendTransaction(preparedTx);
-
-      if (sendResult.status === "ERROR") {
-        return {
-          ok: false,
-          error:
-            sendResult.errorResult?.toString() ?? "Transaction submission error",
-          txHash: sendResult.hash,
-        };
-      }
-
-      await this.waitForTransaction(sendResult.hash);
-
-      // Read the newly created task from contract storage so we return
-      // the authoritative on-chain state.
-      const task = await this.readTask(input.taskId);
-
-      return { ok: true, task, txHash: sendResult.hash };
-    } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
     }
+
+    await this.waitForTransaction(sendResult.hash);
+
+    // Read the newly created task from contract storage so we return
+    // the authoritative on-chain state.
+    const task = await this.readTask(input.taskId);
+
+    return { task, txHash: sendResult.hash };
   }
 
   // ------------------------------------------------------------------
@@ -366,49 +377,53 @@ export class TruvoClient {
    * @returns A typed result containing the updated {@link Task} on success.
    */
   async confirmTask(input: ConfirmTaskInput): Promise<TruvoResult> {
-    try {
-      const contract = new Contract(this.contractId);
-      const sourceAccount = await this.server.getAccount(
-        this.keypair.publicKey(),
+    const contract = new Contract(this.contractId);
+
+    const sourceAccount = await retryWithBackoff(
+      () => this.server.getAccount(this.keypair.publicKey()),
+      "getAccount",
+      this.maxRetries,
+    );
+
+    const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
+      .setNetworkPassphrase(this.networkPassphrase)
+      .setTimeout(30)
+      .addOperation(
+        contract.call(
+          "confirm_completion",
+          hex32ToScVal(input.taskId),
+          hex32ToScVal(input.proofHash),
+        ),
+      )
+      .build();
+
+    const preparedTx = await retryWithBackoff(
+      () => this.server.prepareTransaction(tx),
+      "prepareTransaction",
+      this.maxRetries,
+    );
+    preparedTx.sign(this.keypair);
+
+    const sendResult = await retryWithBackoff(
+      () => this.server.sendTransaction(preparedTx),
+      "sendTransaction",
+      this.maxRetries,
+    );
+
+    if (sendResult.status === "ERROR") {
+      const errMsg = sendResult.errorResult?.toString() ?? "Transaction submission error";
+      throw new TruvoContractError(
+        `confirmTask failed: ${errMsg}`,
+        errMsg,
+        sendResult.hash,
       );
-
-      const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
-        .setNetworkPassphrase(this.networkPassphrase)
-        .setTimeout(30)
-        .addOperation(
-          contract.call(
-            "confirm_completion",
-            hex32ToScVal(input.taskId),
-            hex32ToScVal(input.proofHash),
-          ),
-        )
-        .build();
-
-      const preparedTx = await this.server.prepareTransaction(tx);
-      preparedTx.sign(this.keypair);
-
-      const sendResult = await this.server.sendTransaction(preparedTx);
-
-      if (sendResult.status === "ERROR") {
-        return {
-          ok: false,
-          error:
-            sendResult.errorResult?.toString() ?? "Transaction submission error",
-          txHash: sendResult.hash,
-        };
-      }
-
-      await this.waitForTransaction(sendResult.hash);
-
-      const task = await this.readTask(input.taskId);
-
-      return { ok: true, task, txHash: sendResult.hash };
-    } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
     }
+
+    await this.waitForTransaction(sendResult.hash);
+
+    const task = await this.readTask(input.taskId);
+
+    return { task, txHash: sendResult.hash };
   }
 
   // ------------------------------------------------------------------
@@ -431,58 +446,62 @@ export class TruvoClient {
    *   event-derived `worker` and `amount` on success.
    */
   async releaseFunds(input: ReleaseFundsInput): Promise<ReleaseFundsResult> {
-    try {
-      const contract = new Contract(this.contractId);
-      const sourceAccount = await this.server.getAccount(
-        this.keypair.publicKey(),
+    const contract = new Contract(this.contractId);
+
+    const sourceAccount = await retryWithBackoff(
+      () => this.server.getAccount(this.keypair.publicKey()),
+      "getAccount",
+      this.maxRetries,
+    );
+
+    const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
+      .setNetworkPassphrase(this.networkPassphrase)
+      .setTimeout(30)
+      .addOperation(
+        contract.call("release_funds", hex32ToScVal(input.taskId)),
+      )
+      .build();
+
+    const preparedTx = await retryWithBackoff(
+      () => this.server.prepareTransaction(tx),
+      "prepareTransaction",
+      this.maxRetries,
+    );
+    preparedTx.sign(this.keypair);
+
+    const sendResult = await retryWithBackoff(
+      () => this.server.sendTransaction(preparedTx),
+      "sendTransaction",
+      this.maxRetries,
+    );
+
+    if (sendResult.status === "ERROR") {
+      const errMsg = sendResult.errorResult?.toString() ?? "Transaction submission error";
+      throw new TruvoContractError(
+        `releaseFunds failed: ${errMsg}`,
+        errMsg,
+        sendResult.hash,
       );
-
-      const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
-        .setNetworkPassphrase(this.networkPassphrase)
-        .setTimeout(30)
-        .addOperation(
-          contract.call("release_funds", hex32ToScVal(input.taskId)),
-        )
-        .build();
-
-      const preparedTx = await this.server.prepareTransaction(tx);
-      preparedTx.sign(this.keypair);
-
-      const sendResult = await this.server.sendTransaction(preparedTx);
-
-      if (sendResult.status === "ERROR") {
-        return {
-          ok: false,
-          error:
-            sendResult.errorResult?.toString() ?? "Transaction submission error",
-          txHash: sendResult.hash,
-        };
-      }
-
-      const meta = await this.waitForTransactionGetMeta(sendResult.hash);
-      const task = await this.readTask(input.taskId);
-
-      // Parse the `task_released` event for authoritative transfer details.
-      // Event data: (task_id, worker, amount)
-      let worker = task.worker;
-      let amount = task.amount;
-
-      const eventData = meta ? findContractEvent(meta, "task_released") : null;
-      if (eventData) {
-        const eventVec = eventData.vec();
-        if (eventVec && eventVec.length >= 3) {
-          worker = scValToAddress(eventVec[1]);
-          amount = scValToI128(eventVec[2]);
-        }
-      }
-
-      return { ok: true, task, txHash: sendResult.hash, worker, amount };
-    } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
     }
+
+    const meta = await this.waitForTransactionGetMeta(sendResult.hash);
+    const task = await this.readTask(input.taskId);
+
+    // Parse the `task_released` event for authoritative transfer details.
+    // Event data: (task_id, worker, amount)
+    let worker = task.worker;
+    let amount = task.amount;
+
+    const eventData = meta ? findContractEvent(meta, "task_released") : null;
+    if (eventData) {
+      const eventVec = eventData.vec();
+      if (eventVec && eventVec.length >= 3) {
+        worker = scValToAddress(eventVec[1]);
+        amount = scValToI128(eventVec[2]);
+      }
+    }
+
+    return { task, txHash: sendResult.hash, worker, amount };
   }
 
   // ------------------------------------------------------------------
@@ -506,58 +525,62 @@ export class TruvoClient {
   async refundExpired(
     input: RefundExpiredInput,
   ): Promise<RefundExpiredResult> {
-    try {
-      const contract = new Contract(this.contractId);
-      const sourceAccount = await this.server.getAccount(
-        this.keypair.publicKey(),
+    const contract = new Contract(this.contractId);
+
+    const sourceAccount = await retryWithBackoff(
+      () => this.server.getAccount(this.keypair.publicKey()),
+      "getAccount",
+      this.maxRetries,
+    );
+
+    const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
+      .setNetworkPassphrase(this.networkPassphrase)
+      .setTimeout(30)
+      .addOperation(
+        contract.call("refund_if_expired", hex32ToScVal(input.taskId)),
+      )
+      .build();
+
+    const preparedTx = await retryWithBackoff(
+      () => this.server.prepareTransaction(tx),
+      "prepareTransaction",
+      this.maxRetries,
+    );
+    preparedTx.sign(this.keypair);
+
+    const sendResult = await retryWithBackoff(
+      () => this.server.sendTransaction(preparedTx),
+      "sendTransaction",
+      this.maxRetries,
+    );
+
+    if (sendResult.status === "ERROR") {
+      const errMsg = sendResult.errorResult?.toString() ?? "Transaction submission error";
+      throw new TruvoContractError(
+        `refundExpired failed: ${errMsg}`,
+        errMsg,
+        sendResult.hash,
       );
-
-      const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
-        .setNetworkPassphrase(this.networkPassphrase)
-        .setTimeout(30)
-        .addOperation(
-          contract.call("refund_if_expired", hex32ToScVal(input.taskId)),
-        )
-        .build();
-
-      const preparedTx = await this.server.prepareTransaction(tx);
-      preparedTx.sign(this.keypair);
-
-      const sendResult = await this.server.sendTransaction(preparedTx);
-
-      if (sendResult.status === "ERROR") {
-        return {
-          ok: false,
-          error:
-            sendResult.errorResult?.toString() ?? "Transaction submission error",
-          txHash: sendResult.hash,
-        };
-      }
-
-      const meta = await this.waitForTransactionGetMeta(sendResult.hash);
-      const task = await this.readTask(input.taskId);
-
-      // Parse the `task_refunded` event for authoritative refund details.
-      // Event data: (task_id, payer, amount)
-      let payer = task.payer;
-      let amount = task.amount;
-
-      const eventData = meta ? findContractEvent(meta, "task_refunded") : null;
-      if (eventData) {
-        const eventVec = eventData.vec();
-        if (eventVec && eventVec.length >= 3) {
-          payer = scValToAddress(eventVec[1]);
-          amount = scValToI128(eventVec[2]);
-        }
-      }
-
-      return { ok: true, task, txHash: sendResult.hash, payer, amount };
-    } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
     }
+
+    const meta = await this.waitForTransactionGetMeta(sendResult.hash);
+    const task = await this.readTask(input.taskId);
+
+    // Parse the `task_refunded` event for authoritative refund details.
+    // Event data: (task_id, payer, amount)
+    let payer = task.payer;
+    let amount = task.amount;
+
+    const eventData = meta ? findContractEvent(meta, "task_refunded") : null;
+    if (eventData) {
+      const eventVec = eventData.vec();
+      if (eventVec && eventVec.length >= 3) {
+        payer = scValToAddress(eventVec[1]);
+        amount = scValToI128(eventVec[2]);
+      }
+    }
+
+    return { task, txHash: sendResult.hash, payer, amount };
   }
 
   // ------------------------------------------------------------------
@@ -597,53 +620,57 @@ export class TruvoClient {
    * @returns A typed result containing the updated {@link Task} on success.
    */
   async raiseDispute(input: RaiseDisputeInput): Promise<TruvoResult> {
-    try {
-      const contract = new Contract(this.contractId);
-      const sourceAccount = await this.server.getAccount(
-        this.keypair.publicKey(),
+    const contract = new Contract(this.contractId);
+
+    const sourceAccount = await retryWithBackoff(
+      () => this.server.getAccount(this.keypair.publicKey()),
+      "getAccount",
+      this.maxRetries,
+    );
+
+    // The caller address sent to the contract is the client's own public
+    // key. Soroban require_auth verifies that this address signed the
+    // transaction, so the role must match the actual signer.
+    const callerAddress = new Address(this.keypair.publicKey());
+
+    const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
+      .setNetworkPassphrase(this.networkPassphrase)
+      .setTimeout(30)
+      .addOperation(
+        contract.call(
+          "raise_dispute",
+          hex32ToScVal(input.taskId),
+          callerAddress.toScVal(),
+        ),
+      )
+      .build();
+
+    const preparedTx = await retryWithBackoff(
+      () => this.server.prepareTransaction(tx),
+      "prepareTransaction",
+      this.maxRetries,
+    );
+    preparedTx.sign(this.keypair);
+
+    const sendResult = await retryWithBackoff(
+      () => this.server.sendTransaction(preparedTx),
+      "sendTransaction",
+      this.maxRetries,
+    );
+
+    if (sendResult.status === "ERROR") {
+      const errMsg = sendResult.errorResult?.toString() ?? "Transaction submission error";
+      throw new TruvoContractError(
+        `raiseDispute failed: ${errMsg}`,
+        errMsg,
+        sendResult.hash,
       );
-
-      // The caller address sent to the contract is the client's own public
-      // key. Soroban require_auth verifies that this address signed the
-      // transaction, so the role must match the actual signer.
-      const callerAddress = new Address(this.keypair.publicKey());
-
-      const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
-        .setNetworkPassphrase(this.networkPassphrase)
-        .setTimeout(30)
-        .addOperation(
-          contract.call(
-            "raise_dispute",
-            hex32ToScVal(input.taskId),
-            callerAddress.toScVal(),
-          ),
-        )
-        .build();
-
-      const preparedTx = await this.server.prepareTransaction(tx);
-      preparedTx.sign(this.keypair);
-
-      const sendResult = await this.server.sendTransaction(preparedTx);
-
-      if (sendResult.status === "ERROR") {
-        return {
-          ok: false,
-          error:
-            sendResult.errorResult?.toString() ?? "Transaction submission error",
-          txHash: sendResult.hash,
-        };
-      }
-
-      await this.waitForTransaction(sendResult.hash);
-      const task = await this.readTask(input.taskId);
-
-      return { ok: true, task, txHash: sendResult.hash };
-    } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
     }
+
+    await this.waitForTransaction(sendResult.hash);
+    const task = await this.readTask(input.taskId);
+
+    return { task, txHash: sendResult.hash };
   }
 
   // ------------------------------------------------------------------
@@ -666,53 +693,57 @@ export class TruvoClient {
    * @returns A typed result containing the updated {@link Task} on success.
    */
   async resolveDispute(input: ResolveDisputeInput): Promise<TruvoResult> {
-    try {
-      const contract = new Contract(this.contractId);
-      const sourceAccount = await this.server.getAccount(
-        this.keypair.publicKey(),
+    const contract = new Contract(this.contractId);
+
+    const sourceAccount = await retryWithBackoff(
+      () => this.server.getAccount(this.keypair.publicKey()),
+      "getAccount",
+      this.maxRetries,
+    );
+
+    // Map DisputeOutcome to the contract's favor_worker boolean:
+    // "Worker" → true (release funds to worker)
+    // "Payer"  → false (refund to payer)
+    const favorWorker = input.outcome === "Worker";
+
+    const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
+      .setNetworkPassphrase(this.networkPassphrase)
+      .setTimeout(30)
+      .addOperation(
+        contract.call(
+          "resolve_dispute",
+          hex32ToScVal(input.taskId),
+          xdr.ScVal.scvBool(favorWorker),
+        ),
+      )
+      .build();
+
+    const preparedTx = await retryWithBackoff(
+      () => this.server.prepareTransaction(tx),
+      "prepareTransaction",
+      this.maxRetries,
+    );
+    preparedTx.sign(this.keypair);
+
+    const sendResult = await retryWithBackoff(
+      () => this.server.sendTransaction(preparedTx),
+      "sendTransaction",
+      this.maxRetries,
+    );
+
+    if (sendResult.status === "ERROR") {
+      const errMsg = sendResult.errorResult?.toString() ?? "Transaction submission error";
+      throw new TruvoContractError(
+        `resolveDispute failed: ${errMsg}`,
+        errMsg,
+        sendResult.hash,
       );
-
-      // Map DisputeOutcome to the contract's favor_worker boolean:
-      // "Worker" → true (release funds to worker)
-      // "Payer"  → false (refund to payer)
-      const favorWorker = input.outcome === "Worker";
-
-      const tx = new TransactionBuilder(sourceAccount, { fee: BASE_FEE })
-        .setNetworkPassphrase(this.networkPassphrase)
-        .setTimeout(30)
-        .addOperation(
-          contract.call(
-            "resolve_dispute",
-            hex32ToScVal(input.taskId),
-            xdr.ScVal.scvBool(favorWorker),
-          ),
-        )
-        .build();
-
-      const preparedTx = await this.server.prepareTransaction(tx);
-      preparedTx.sign(this.keypair);
-
-      const sendResult = await this.server.sendTransaction(preparedTx);
-
-      if (sendResult.status === "ERROR") {
-        return {
-          ok: false,
-          error:
-            sendResult.errorResult?.toString() ?? "Transaction submission error",
-          txHash: sendResult.hash,
-        };
-      }
-
-      await this.waitForTransaction(sendResult.hash);
-      const task = await this.readTask(input.taskId);
-
-      return { ok: true, task, txHash: sendResult.hash };
-    } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
     }
+
+    await this.waitForTransaction(sendResult.hash);
+    const task = await this.readTask(input.taskId);
+
+    return { task, txHash: sendResult.hash };
   }
 
   // ------------------------------------------------------------------
@@ -728,7 +759,11 @@ export class TruvoClient {
   ): Promise<xdr.TransactionMeta | null> {
     const MAX_ATTEMPTS = 30;
     for (let i = 0; i < MAX_ATTEMPTS; i++) {
-      const result = await this.server.getTransaction(hash);
+      const result = await retryWithBackoff(
+        () => this.server.getTransaction(hash),
+        `getTransaction(${hash.slice(0, 8)}…)`,
+        this.maxRetries,
+      );
 
       if (result.status === "SUCCESS") {
         return result.resultMetaXdr;
@@ -736,16 +771,18 @@ export class TruvoClient {
 
       if (result.status === "FAILED") {
         const errResult = (result as ApiFailedTx).resultXdr;
-        throw new Error(
-          `Transaction failed on-chain: ${errResult?.toString() ?? "unknown"}`,
-        );
+        const errMsg = `Transaction failed on-chain: ${errResult?.toString() ?? "unknown"}`;
+        throw new TruvoContractError(errMsg, errMsg, hash);
       }
 
       // NOT_FOUND – still pending; wait and retry.
       await new Promise((r) => setTimeout(r, 1000));
     }
-    throw new Error(
+    throw new TruvoNetworkError(
       `Transaction ${hash} was not confirmed after ${MAX_ATTEMPTS} attempts`,
+      MAX_ATTEMPTS,
+      undefined,
+      hash,
     );
   }
 
@@ -766,10 +803,14 @@ export class TruvoClient {
    */
   private async readTask(taskId: string): Promise<Task> {
     const key = xdr.ScVal.scvBytes(Buffer.from(taskId, "hex"));
-    const entry = await this.server.getContractData(
-      this.contractId,
-      key,
-      SorobanRpc.Durability.Persistent,
+    const entry = await retryWithBackoff(
+      () => this.server.getContractData(
+        this.contractId,
+        key,
+        SorobanRpc.Durability.Persistent,
+      ),
+      "getContractData",
+      this.maxRetries,
     );
     const contractData = entry.val.contractData();
     return decodeTaskData(contractData.val(), taskId);

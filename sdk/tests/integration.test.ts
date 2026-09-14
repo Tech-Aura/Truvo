@@ -142,17 +142,6 @@ async function invokeRaw(
   );
 }
 
-/**
- * Assert that a TruvoResult is successful and return the narrowed task.
- * Throws a descriptive error if the result is a failure.
- */
-function assertOk<T extends { ok: boolean }>(result: T, label: string): any {
-  if (!result.ok) {
-    const msg = (result as any).error ?? "unknown error";
-    throw new Error(`${label}: ${msg}`);
-  }
-  return (result as any).task;
-}
 
 // ============================================================================
 // Test Suite
@@ -237,12 +226,11 @@ describe("SDK integration tests — Stellar Testnet", () => {
       deadline,
     });
 
-    const createTask = assertOk(createResult, "createEscrow");
-    expect(createTask.status).toBe(TaskStatus.Created);
-    expect(createTask.payer).toBe(payerKp.publicKey());
-    expect(createTask.worker).toBe(workerKp.publicKey());
-    expect(createTask.amount).toBe(amount);
-    expect(createTask.deadline).toBe(deadline);
+    expect(createResult.task.status).toBe(TaskStatus.Created);
+    expect(createResult.task.payer).toBe(payerKp.publicKey());
+    expect(createResult.task.worker).toBe(workerKp.publicKey());
+    expect(createResult.task.amount).toBe(amount);
+    expect(createResult.task.deadline).toBe(deadline);
 
     // Step 2: confirmTask (worker signs)
     const confirmResult = await workerClient.confirmTask({
@@ -250,17 +238,15 @@ describe("SDK integration tests — Stellar Testnet", () => {
       proofHash,
     });
 
-    const confirmTask = assertOk(confirmResult, "confirmTask");
-    expect(confirmTask.status).toBe(TaskStatus.Confirmed);
-    expect(confirmTask.proof_hash).toBe(proofHash);
+    expect(confirmResult.task.status).toBe(TaskStatus.Confirmed);
+    expect(confirmResult.task.proof_hash).toBe(proofHash);
 
     // Step 3: releaseFunds (any funded account)
     const releaseResult = await payerClient.releaseFunds({ taskId });
 
-    const releasedTask = assertOk(releaseResult, "releaseFunds");
-    expect(releasedTask.status).toBe(TaskStatus.Released);
-    expect(releaseResult.ok && releaseResult.worker).toBe(workerKp.publicKey());
-    expect(releaseResult.ok && releaseResult.amount).toBe(amount);
+    expect(releaseResult.task.status).toBe(TaskStatus.Released);
+    expect(releaseResult.worker).toBe(workerKp.publicKey());
+    expect(releaseResult.amount).toBe(amount);
   });
 
   // ------------------------------------------------------------------
@@ -282,16 +268,14 @@ describe("SDK integration tests — Stellar Testnet", () => {
       deadline,
     });
 
-    assertOk(createResult, "createEscrow");
-    expect(createResult.ok && createResult.task.status).toBe(TaskStatus.Created);
+    expect(createResult.task.status).toBe(TaskStatus.Created);
 
     // Step 2: refundExpired — should succeed because deadline has passed.
     const refundResult = await payerClient.refundExpired({ taskId });
 
-    const refundTask = assertOk(refundResult, "refundExpired");
-    expect(refundTask.status).toBe(TaskStatus.Refunded);
-    expect(refundResult.ok && refundResult.payer).toBe(payerKp.publicKey());
-    expect(refundResult.ok && refundResult.amount).toBe(amount);
+    expect(refundResult.task.status).toBe(TaskStatus.Refunded);
+    expect(refundResult.payer).toBe(payerKp.publicKey());
+    expect(refundResult.amount).toBe(amount);
   });
 
   // ------------------------------------------------------------------
@@ -325,8 +309,7 @@ describe("SDK integration tests — Stellar Testnet", () => {
       deadline,
     });
 
-    assertOk(createResult, "createEscrow");
-    expect(createResult.ok && createResult.task.status).toBe(TaskStatus.Created);
+    expect(createResult.task.status).toBe(TaskStatus.Created);
 
     // Step 2: confirmTask (worker signs)
     const confirmResult = await workerClient.confirmTask({
@@ -334,8 +317,7 @@ describe("SDK integration tests — Stellar Testnet", () => {
       proofHash,
     });
 
-    assertOk(confirmResult, "confirmTask");
-    expect(confirmResult.ok && confirmResult.task.status).toBe(TaskStatus.Confirmed);
+    expect(confirmResult.task.status).toBe(TaskStatus.Confirmed);
 
     // Step 3: raiseDispute (worker raises)
     const disputeResult = await workerClient.raiseDispute({
@@ -343,8 +325,7 @@ describe("SDK integration tests — Stellar Testnet", () => {
       role: "worker",
     });
 
-    assertOk(disputeResult, "raiseDispute");
-    expect(disputeResult.ok && disputeResult.task.status).toBe(TaskStatus.Disputed);
+    expect(disputeResult.task.status).toBe(TaskStatus.Disputed);
 
     // Step 4: resolveDispute (arbitrator resolves in favor of worker)
     const resolveResult = await arbitratorClient.resolveDispute({
@@ -352,7 +333,6 @@ describe("SDK integration tests — Stellar Testnet", () => {
       outcome: "Worker",
     });
 
-    assertOk(resolveResult, "resolveDispute");
-    expect(resolveResult.ok && resolveResult.task.status).toBe(TaskStatus.Released);
+    expect(resolveResult.task.status).toBe(TaskStatus.Released);
   });
 });
