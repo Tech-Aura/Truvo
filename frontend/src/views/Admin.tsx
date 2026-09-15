@@ -9,15 +9,15 @@
  * wallet must match arbitrator address" check is used (no full permissions
  * system needed yet).
  *
- * Currently uses placeholder/mock data for the dispute list; the SDK
- * wiring branch replaces this with real on-chain queries.
+ * Now wired to the Truvo SDK — tasks are fetched from on-chain storage
+ * and disputes are resolved via the SDK's resolveDispute method.
  */
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useWallet } from "../wallet/WalletContext";
-import { EscrowTask } from "../types/task";
+import { useTruvoSDK } from "../sdk/TruvoContext";
+import { EscrowTask, TaskStatus } from "../types/task";
 import { DisputeList } from "./admin/DisputeList";
-import { getMockDisputedTasks } from "./admin/mockDisputes";
 
 /**
  * Placeholder arbitrator address — in production this would come from
@@ -27,11 +27,58 @@ import { getMockDisputedTasks } from "./admin/mockDisputes";
 const ARBITRATOR_ADDRESS =
   "GARBITRATORMOCKADDRESS00000000000000000000000000000000000000000";
 
+/** localStorage key for tracking all known task IDs (across users). */
+const ALL_TASK_IDS_KEY = "truvo_all_task_ids";
+
+function loadAllTaskIds(): string[] {
+  try {
+    const raw = localStorage.getItem(ALL_TASK_IDS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function Admin() {
   const { isConnected, publicKey } = useWallet();
-  const [disputes] = useState<EscrowTask[]>(() => getMockDisputedTasks());
+  const sdk = useTruvoSDK();
+  const [disputes, setDisputes] = useState<EscrowTask[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const isArbitrator = isConnected && publicKey === ARBITRATOR_ADDRESS;
+
+  /** Fetch all disputed tasks from on-chain storage. */
+  const refreshDisputes = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const taskIds = loadAllTaskIds();
+      const fetched: EscrowTask[] = [];
+
+      for (const id of taskIds) {
+        try {
+          const task = await sdk.getTask(id);
+          if (task.status === TaskStatus.Disputed) {
+            fetched.push(task as EscrowTask);
+          }
+        } catch {
+          // Task may have been removed or not found
+        }
+      }
+
+      setDisputes(fetched);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch disputes");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [sdk]);
+
+  // Fetch disputes on mount
+  useEffect(() => {
+    refreshDisputes();
+  }, [refreshDisputes]);
 
   if (!isConnected) {
     return (
@@ -126,22 +173,61 @@ export default function Admin() {
     );
   }
 
+  const handleResolve = useCallback(
+    async (taskId: string, outcome: "Worker" | "Payer") => {
+      setError(null);
+      try {
+        await sdk.resolveDispute({ taskId, outcome });
+        // Remove the resolved dispute from the list
+        setDisputes((prev) => prev.filter((t) => t.task_id !== taskId));
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Failed to resolve dispute",
+        );
+        throw err; // Re-throw so the modal can display the error
+      }
+    },
+    [sdk],
+  );
+
   return (
     <section className="view">
       <h2>Admin</h2>
       <p className="hint">
         Connected as arbitrator <code>{publicKey}</code>
       </p>
+      {error && (
+        <div
+          className="worker-alert-success"
+          style={{
+            backgroundColor: "rgba(247, 118, 142, 0.1)",
+            borderColor: "rgba(247, 118, 142, 0.35)",
+            color: "#f7768e",
+          }}
+        >
+          <div>
+            <strong>Error</strong>
+            <p>{error}</p>
+          </div>
+          <button className="btn-dismiss" onClick={() => setError(null)}>
+            ×
+          </button>
+        </div>
+      )}
       <DisputeList
         tasks={disputes}
-        onResolve={async (taskId, outcome) => {
-          console.log(
-            "[placeholder] resolveDispute would be called with:",
-            JSON.stringify({ taskId, outcome }, null, 2),
-          );
-          // SDK wiring: resolveDispute({ taskId, outcome }) goes here
-        }}
+        onResolve={handleResolve}
       />
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "0.5rem" }}>
+        <button
+          className="btn-action"
+          onClick={refreshDisputes}
+          disabled={isLoading}
+          style={{ fontSize: "0.78rem" }}
+        >
+          {isLoading ? "Refreshing…" : "Refresh Disputes"}
+        </button>
+      </div>
     </section>
   );
 }

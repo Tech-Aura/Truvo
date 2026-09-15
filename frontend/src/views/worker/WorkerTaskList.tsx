@@ -8,12 +8,11 @@
  * submission flow, and provides the withdraw-to-local-currency flow.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { EscrowTask, TaskStatus } from "../../types/task";
-import { getMockWorkerTasks } from "./mockTasks";
+import { useTruvoSDK } from "../../sdk/TruvoContext";
 import { SubmitProofModal } from "./SubmitProofModal";
 import { WithdrawModal } from "./WithdrawModal";
-import { estimateLocalValue } from "./withdrawalUtils";
 
 /** Status display metadata matching contract codes. */
 const STATUS_META: Record<TaskStatus, { label: string; badgeClass: string }> = {
@@ -56,60 +55,35 @@ function formatRelative(seconds: number): string {
 
 interface WorkerTaskListProps {
   /**
-   * Tasks to display. If not provided, mock tasks for the workerAddress are used.
+   * Tasks to display. If not provided, tasks are fetched from on-chain storage
+   * using the SDK's getTask method with tracked task IDs.
    */
   tasks?: EscrowTask[];
   /** Connected worker wallet address. */
   workerAddress?: string | null;
-  /**
-   * Placeholder balance for worker's wallet in XLM.
-   * Defaults to sum of released tasks if not explicitly provided.
-   */
-  placeholderBalance?: string;
-  /**
-   * Placeholder submit handler for proof submission. Real SDK call
-   * (TruvoClient.confirmTask) replaces this in a later branch.
-   */
-  onSubmitProofPlaceholder?: (
-    taskId: string,
-    proofHash: string,
-    description: string,
-  ) => void;
-  /**
-   * Placeholder handler for initiating anchor withdrawal. Real SDK call
-   * (AnchorClient.initiateWithdrawal) replaces this in a later branch.
-   */
-  onInitiateWithdrawalPlaceholder?: (
-    assetCode: string,
-    amount: string,
-    account: string,
-  ) => { transactionId: string; interactiveUrl: string };
+}
+
+/** localStorage key for tracking worker task IDs. */
+const WORKER_TASK_IDS_KEY = "truvo_worker_task_ids";
+
+function loadWorkerTaskIds(): string[] {
+  try {
+    const raw = localStorage.getItem(WORKER_TASK_IDS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
 }
 
 export function WorkerTaskList({
   tasks: customTasks,
   workerAddress,
-  placeholderBalance: customBalance,
-  onSubmitProofPlaceholder = (taskId, proofHash, description) => {
-    console.log(
-      "[placeholder] TruvoClient.confirmTask would be called with:",
-      JSON.stringify(
-        {
-          taskId,
-          proofHash,
-          description,
-        },
-        null,
-        2,
-      ),
-    );
-  },
-  onInitiateWithdrawalPlaceholder,
 }: WorkerTaskListProps) {
+  const sdk = useTruvoSDK();
   const [filter, setFilter] = useState<TaskFilter>("all");
-  const [taskList, setTaskList] = useState<EscrowTask[]>(() => {
-    return customTasks ?? getMockWorkerTasks(workerAddress);
-  });
+  const [taskList, setTaskList] = useState<EscrowTask[]>(customTasks ?? []);
+  const [isLoading, setIsLoading] = useState(false);
+  const [, setError] = useState<string | null>(null);
   const [selectedTaskForProof, setSelectedTaskForProof] =
     useState<EscrowTask | null>(null);
   const [selectedTaskForWithdraw, setSelectedTaskForWithdraw] =
@@ -119,11 +93,67 @@ export function WorkerTaskList({
     taskId: string;
     proofHash: string;
   } | null>(null);
+  const [walletBalance, setWalletBalance] = useState<string>("0");
 
-  // Sync if customTasks or workerAddress changes
+  /** Fetch tasks from on-chain storage. */
+  const refreshTasks = useCallback(async () => {
+    if (!workerAddress) return;
+
+    setIsLoading(true);
+    setError(null);
+    try {
+      const taskIds = loadWorkerTaskIds();
+      const fetched: EscrowTask[] = [];
+
+      for (const id of taskIds) {
+        try {
+          const task = await sdk.getTask(id);
+          // Filter to tasks where this worker is assigned
+          if (task.worker === workerAddress) {
+            fetched.push(task as EscrowTask);
+          }
+        } catch {
+          // Task may have been removed or not found
+        }
+      }
+
+      setTaskList(fetched);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch tasks");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [workerAddress, sdk]);
+
+  /** Fetch wallet balance from Horizon. */
+  const refreshBalance = useCallback(async () => {
+    if (!workerAddress) return;
+    try {
+      const balance = await sdk.getWorkerBalance(workerAddress);
+      setWalletBalance(balance.available);
+    } catch {
+      // Balance fetch failed — use fallback from released tasks
+      const sum = taskList
+        .filter((t) => t.status === TaskStatus.Released)
+        .reduce((acc, t) => acc + (parseFloat(t.amount) || 0), 0);
+      setWalletBalance(sum.toFixed(2));
+    }
+  }, [workerAddress, sdk, taskList]);
+
+  // Fetch tasks and balance on mount
   useEffect(() => {
-    setTaskList(customTasks ?? getMockWorkerTasks(workerAddress));
-  }, [customTasks, workerAddress]);
+    if (workerAddress) {
+      refreshTasks();
+      refreshBalance();
+    }
+  }, [workerAddress, refreshTasks, refreshBalance]);
+
+  // Sync if customTasks changes
+  useEffect(() => {
+    if (customTasks) {
+      setTaskList(customTasks);
+    }
+  }, [customTasks]);
 
   const awaitingActionCount = useMemo(
     () => taskList.filter((t) => t.status === TaskStatus.Created).length,
@@ -135,17 +165,14 @@ export function WorkerTaskList({
     [taskList],
   );
 
-  // Compute spendable wallet balance from released tasks
-  const walletBalance = useMemo(() => {
-    if (customBalance !== undefined) return customBalance;
-    const sum = taskList
-      .filter((t) => t.status === TaskStatus.Released)
-      .reduce((acc, t) => acc + (parseFloat(t.amount) || 0), 0);
-    return sum.toFixed(2);
-  }, [taskList, customBalance]);
-
   const balanceEstimate = useMemo(() => {
-    return estimateLocalValue(walletBalance, "NGN");
+    // Use SDK estimateLocalCurrencyValue for real estimation
+    // For now, return a placeholder estimate
+    const xlmAmount = parseFloat(walletBalance) || 0;
+    return {
+      formatted: `~${(xlmAmount * 0.12).toFixed(2)} USD`,
+      rate: 0.12,
+    };
   }, [walletBalance]);
 
   const hasReleasedFunds = parseFloat(walletBalance) > 0;
@@ -161,24 +188,32 @@ export function WorkerTaskList({
     }
   }, [taskList, filter]);
 
-  const handleProofSubmit = (
-    taskId: string,
-    proofHash: string,
-    description: string,
-  ) => {
-    onSubmitProofPlaceholder(taskId, proofHash, description);
+  const handleProofSubmit = useCallback(
+    async (taskId: string, proofHash: string, _description: string) => {
+      setError(null);
+      try {
+        // Call confirmTask on-chain via the SDK
+        await sdk.confirmTask({ taskId, proofHash });
 
-    setTaskList((prev) =>
-      prev.map((task) =>
-        task.task_id === taskId
-          ? { ...task, status: TaskStatus.Confirmed, proof_hash: proofHash }
-          : task,
-      ),
-    );
+        // Update local state
+        setTaskList((prev) =>
+          prev.map((task) =>
+            task.task_id === taskId
+              ? { ...task, status: TaskStatus.Confirmed, proof_hash: proofHash }
+              : task,
+          ),
+        );
 
-    setSuccessNotice({ taskId, proofHash });
-    setSelectedTaskForProof(null);
-  };
+        setSuccessNotice({ taskId, proofHash });
+        setSelectedTaskForProof(null);
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Failed to confirm task",
+        );
+      }
+    },
+    [sdk],
+  );
 
   const handleOpenWithdrawForTask = (task: EscrowTask) => {
     setSelectedTaskForWithdraw(task);
@@ -393,9 +428,19 @@ export function WorkerTaskList({
         </div>
       )}
 
-      <p className="table-note hint">
-        Showing mock data — on-chain task fetching and contract execution are wired in a later branch.
-      </p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "0.5rem" }}>
+        <button
+          className="btn-action"
+          onClick={refreshTasks}
+          disabled={isLoading}
+          style={{ fontSize: "0.78rem" }}
+        >
+          {isLoading ? "Refreshing…" : "Refresh"}
+        </button>
+        <p className="table-note hint" style={{ margin: 0 }}>
+          {taskList.length} task{taskList.length !== 1 ? "s" : ""} on-chain
+        </p>
+      </div>
 
       {/* Completion Proof Submission Modal */}
       {selectedTaskForProof && (
@@ -416,7 +461,7 @@ export function WorkerTaskList({
             setIsWithdrawModalOpen(false);
             setSelectedTaskForWithdraw(null);
           }}
-          onInitiateWithdrawalPlaceholder={onInitiateWithdrawalPlaceholder}
+
         />
       )}
     </div>

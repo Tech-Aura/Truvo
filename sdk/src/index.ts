@@ -20,6 +20,9 @@ export {
   type TruvoResult,
   type ReleaseFundsResult,
   type RefundExpiredResult,
+  i128ToScVal,
+  u64ToScVal,
+  hex32ToScVal,
 } from "./client";
 export {
   TruvoError,

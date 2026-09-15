@@ -14,6 +14,8 @@ import {
   validateCreateTaskForm,
 } from "./validation";
 
+export type { CreateTaskFields } from "./validation";
+
 const EMPTY_FIELDS: CreateTaskFields = {
   worker: "",
   amount: "",
@@ -21,31 +23,15 @@ const EMPTY_FIELDS: CreateTaskFields = {
 };
 
 interface CreateTaskFormProps {
-  /**
-   * Placeholder submit handler — replace with the real SDK call
-   * (TruvoClient.createEscrow) in a later branch.
-   */
-  onSubmitPlaceholder?: (fields: CreateTaskFields) => void;
+  /** Real submit handler — calls createEscrow on-chain. */
+  onSubmit?: (fields: CreateTaskFields) => void;
+  /** Whether a submission is in progress. */
+  isSubmitting?: boolean;
 }
 
 export function CreateTaskForm({
-  onSubmitPlaceholder = (fields) => {
-    console.log(
-      "[placeholder] createEscrow would be called with:",
-      JSON.stringify(
-        {
-          worker: fields.worker.trim(),
-          amount: fields.amount.trim(),
-          deadline: new Date(fields.deadline).toISOString(),
-          deadlineUnixSeconds: Math.floor(
-            new Date(fields.deadline).getTime() / 1000,
-          ),
-        },
-        null,
-        2,
-      ),
-    );
-  },
+  onSubmit,
+  isSubmitting = false,
 }: CreateTaskFormProps) {
   const [fields, setFields] = useState<CreateTaskFields>(EMPTY_FIELDS);
   const [errors, setErrors] = useState<CreateTaskFieldErrors>({});
@@ -69,10 +55,8 @@ export function CreateTaskForm({
       return;
     }
 
-    onSubmitPlaceholder(fields);
-    setSubmittedNote(
-      "Task captured (placeholder only — SDK wiring comes in a later branch).",
-    );
+    onSubmit?.(fields);
+    setSubmittedNote("Task submitted — signing with Freighter…");
     setFields(EMPTY_FIELDS);
   };
 
@@ -126,8 +110,8 @@ export function CreateTaskForm({
         </p>
       </div>
 
-      <button type="submit" className="primary">
-        Create task
+      <button type="submit" className="primary" disabled={isSubmitting}>
+        {isSubmitting ? "Creating…" : "Create task"}
       </button>
 
       {submittedNote && <p className="submit-note">{submittedNote}</p>}

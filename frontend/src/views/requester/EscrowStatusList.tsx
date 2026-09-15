@@ -7,8 +7,7 @@
  * branch — the component's props already match the SDK's Task shape.
  */
 
-import { TaskStatus } from "../../types/task";
-import { EscrowTask, MOCK_TASKS } from "./mockTasks";
+import { EscrowTask, TaskStatus } from "../../types/task";
 
 /** Display metadata per status: label + CSS badge class. */
 const STATUS_META: Record<TaskStatus, { label: string; badgeClass: string }> = {
@@ -48,17 +47,20 @@ function formatRelative(seconds: number): string {
 }
 
 interface EscrowStatusListProps {
-  /**
-   * Tasks to display. Defaults to mock data for now; the SDK wiring branch
-   * passes real on-chain tasks instead (same shape).
-   */
-  tasks?: EscrowTask[];
+  /** Tasks to display — real on-chain tasks from the SDK. */
+  tasks: EscrowTask[];
+  /** Whether tasks are being loaded. */
+  isLoading?: boolean;
+  /** Callback to refresh the task list. */
+  onRefresh?: () => void;
 }
 
 export function EscrowStatusList({
-  tasks = MOCK_TASKS,
+  tasks,
+  isLoading = false,
+  onRefresh,
 }: EscrowStatusListProps) {
-  if (tasks.length === 0) {
+  if (tasks.length === 0 && !isLoading) {
     return (
       <div className="escrow-list">
         <h3>Your escrowed tasks</h3>
@@ -107,9 +109,16 @@ export function EscrowStatusList({
           </tbody>
         </table>
       </div>
-      <p className="table-note hint">
-        Showing mock data — on-chain task fetching is wired in a later branch.
-      </p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "0.5rem" }}>
+        {onRefresh && (
+          <button className="btn-action" onClick={onRefresh} disabled={isLoading} style={{ fontSize: "0.78rem" }}>
+            {isLoading ? "Refreshing…" : "Refresh"}
+          </button>
+        )}
+        <p className="table-note hint" style={{ margin: 0 }}>
+          {tasks.length} task{tasks.length !== 1 ? "s" : ""} on-chain
+        </p>
+      </div>
     </div>
   );
 }

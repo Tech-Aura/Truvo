@@ -2,8 +2,9 @@
  * Worker view.
  *
  * Displays assigned tasks for the connected worker account, provides
- * status filtering, and will host completion proof submissions and
- * off-ramp withdrawals.
+ * status filtering, and hosts completion proof submissions and
+ * off-ramp withdrawals. Now wired to the Truvo SDK for real on-chain
+ * task fetching and contract execution.
  */
 
 import { useWallet } from "../wallet/WalletContext";
