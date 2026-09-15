@@ -18,6 +18,7 @@ import { useWallet } from "../wallet/WalletContext";
 import { useTruvoSDK } from "../sdk/TruvoContext";
 import { EscrowTask, TaskStatus } from "../types/task";
 import { DisputeList } from "./admin/DisputeList";
+import { classifyError, ClassifiedError } from "../utils/errorUtils";
 
 /**
  * Placeholder arbitrator address — in production this would come from
@@ -44,7 +45,7 @@ export default function Admin() {
   const sdk = useTruvoSDK();
   const [disputes, setDisputes] = useState<EscrowTask[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ClassifiedError | null>(null);
 
   const isArbitrator = isConnected && publicKey === ARBITRATOR_ADDRESS;
 
@@ -69,7 +70,7 @@ export default function Admin() {
 
       setDisputes(fetched);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch disputes");
+      setError(classifyError(err));
     } finally {
       setIsLoading(false);
     }
@@ -181,9 +182,8 @@ export default function Admin() {
         // Remove the resolved dispute from the list
         setDisputes((prev) => prev.filter((t) => t.task_id !== taskId));
       } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to resolve dispute",
-        );
+        const classifiedErr = classifyError(err);
+        setError(classifiedErr);
         throw err; // Re-throw so the modal can display the error
       }
     },
@@ -198,7 +198,7 @@ export default function Admin() {
       </p>
       {error && (
         <div
-          className="worker-alert-success"
+          className="worker-alert-success error-alert"
           style={{
             backgroundColor: "rgba(247, 118, 142, 0.1)",
             borderColor: "rgba(247, 118, 142, 0.35)",
@@ -207,7 +207,12 @@ export default function Admin() {
         >
           <div>
             <strong>Error</strong>
-            <p>{error}</p>
+            <p>{error.message}</p>
+            {error.isRetryable && (
+              <p style={{ fontSize: "0.8rem", marginTop: "0.5rem", color: "#e0af68" }}>
+                This error may be temporary. You can try again.
+              </p>
+            )}
           </div>
           <button className="btn-dismiss" onClick={() => setError(null)}>
             ×

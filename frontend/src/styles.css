@@ -1081,3 +1081,268 @@
   border: none;
   background-color: #ffffff;
 }
+
+/* Error Alert Styles */
+.error-alert {
+  border-radius: 10px;
+  padding: 0.85rem 1.1rem;
+  margin-bottom: 1.25rem;
+  font-size: 0.88rem;
+}
+
+.error-alert p {
+  margin: 0.25rem 0 0;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.error-network {
+  background-color: rgba(224, 175, 104, 0.1);
+  border: 1px solid rgba(224, 175, 104, 0.35);
+  color: #e0af68;
+}
+
+.error-contract {
+  background-color: rgba(247, 118, 142, 0.1);
+  border: 1px solid rgba(247, 118, 142, 0.35);
+  color: #f7768e;
+}
+
+.error-auth {
+  background-color: rgba(187, 154, 247, 0.1);
+  border: 1px solid rgba(187, 154, 247, 0.35);
+  color: #bb9af7;
+}
+
+.error-api {
+  background-color: rgba(122, 162, 247, 0.1);
+  border: 1px solid rgba(122, 162, 247, 0.35);
+  color: #7aa2f7;
+}
+
+.error-unknown {
+  background-color: rgba(247, 118, 142, 0.1);
+  border: 1px solid rgba(247, 118, 142, 0.35);
+  color: #f7768e;
+}
+
+/* Loading Spinner */
+.loading-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  border-top-color: #ffffff;
+  animation: spin 1s ease-in-out infinite;
+  margin-right: 0.5rem;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .app {
+    padding: 0 0.75rem;
+  }
+
+  .navbar {
+    gap: 1rem;
+    padding: 0.5rem 0;
+  }
+
+  .nav-brand h1 {
+    font-size: 1rem;
+  }
+
+  .nav-links {
+    gap: 0.25rem;
+    order: 3;
+    width: 100%;
+    justify-content: center;
+  }
+
+  .nav-links a {
+    padding: 0.25em 0.6em;
+    font-size: 0.85rem;
+  }
+
+  .wallet-widget {
+    order: 2;
+  }
+
+  .modal-container {
+    max-width: 100%;
+    margin: 0.5rem;
+    padding: 1rem;
+    max-height: 85vh;
+  }
+
+  .modal-header {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .modal-actions {
+    flex-direction: column;
+  }
+
+  .modal-actions button {
+    width: 100%;
+  }
+
+  .worker-earnings-card {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 1rem;
+  }
+
+  .earnings-values {
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .withdraw-balance-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .worker-summary-cards {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.5rem;
+  }
+
+  .summary-card {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .summary-value {
+    font-size: 1.1rem;
+  }
+
+  .task-filters {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .filter-btn {
+    padding: 0.25em 0.6em;
+    font-size: 0.75rem;
+  }
+
+  .escrow-list table {
+    font-size: 0.78rem;
+  }
+
+  .escrow-list th,
+  .escrow-list td {
+    padding: 0.4em 0.5em;
+  }
+
+  .table-scroll {
+    border-radius: 8px;
+  }
+
+  .task-proof-summary {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .summary-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.2rem;
+  }
+
+  .input-mode-tabs {
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .mode-tab {
+    width: 100%;
+    text-align: center;
+  }
+
+  .session-action-buttons {
+    flex-direction: column;
+  }
+
+  .session-action-buttons button {
+    width: 100%;
+  }
+
+  .proof-explanation-card {
+    padding: 0.75rem;
+  }
+
+  .explanation-list {
+    padding-left: 1rem;
+  }
+}
+
+/* Extra small screens */
+@media (max-width: 480px) {
+  .worker-summary-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .summary-card {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .escrow-list th:nth-child(n+4),
+  .escrow-list td:nth-child(n+4) {
+    display: none;
+  }
+
+  .escrow-list th:first-child,
+  .escrow-list td:first-child {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .balance-item {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .anchor-badge-banner {
+    padding: 0.75rem;
+  }
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+  .status-badge {
+    border-width: 2px;
+  }
+
+  .btn-action {
+    border: 1px solid currentColor;
+  }
+
+  .filter-btn {
+    border-width: 2px;
+  }
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  .loading-spinner {
+    animation: none;
+  }
+
+  .pulse-dot {
+    animation: none;
+    box-shadow: none;
+  }
+
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}

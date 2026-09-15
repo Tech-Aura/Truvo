@@ -14,6 +14,7 @@ import {
   CurrencyOption,
   SUPPORTED_LOCAL_CURRENCIES,
 } from "./withdrawalUtils";
+import { classifyError, ClassifiedError } from "../../utils/errorUtils";
 
 interface WithdrawModalProps {
   workerAddress: string;
@@ -37,7 +38,7 @@ export function WithdrawModal({
   const [amount, setAmount] = useState(defaultAmount || availableBalance || "10");
   const [selectedCurrency, setSelectedCurrency] = useState<string>("NGN");
   const [isInitiating, setIsInitiating] = useState(false);
-  const [withdrawalError, setWithdrawalError] = useState<string | null>(null);
+  const [withdrawalError, setWithdrawalError] = useState<ClassifiedError | null>(null);
   const [withdrawalSession, setWithdrawalSession] = useState<{
     transactionId: string;
     interactiveUrl: string;
@@ -121,9 +122,7 @@ export function WithdrawModal({
         // Open SEP-24 interactive URL in new tab
         window.open(result.interactiveUrl, "_blank", "noopener,noreferrer");
       } catch (err) {
-        setWithdrawalError(
-          err instanceof Error ? err.message : "Failed to initiate withdrawal",
-        );
+        setWithdrawalError(classifyError(err));
       } finally {
         setIsInitiating(false);
       }
@@ -192,7 +191,8 @@ export function WithdrawModal({
 
         {withdrawalError && !withdrawalSession && (
           <div
-            className="worker-alert-success"
+            className="worker-alert-success error-alert"
+            role="alert"
             style={{
               backgroundColor: "rgba(247, 118, 142, 0.1)",
               borderColor: "rgba(247, 118, 142, 0.35)",
@@ -202,7 +202,12 @@ export function WithdrawModal({
           >
             <div>
               <strong>Error</strong>
-              <p>{withdrawalError}</p>
+              <p>{withdrawalError.message}</p>
+              {withdrawalError.isRetryable && (
+                <p style={{ fontSize: "0.8rem", marginTop: "0.5rem", color: "#e0af68" }}>
+                  This error may be temporary. You can try again.
+                </p>
+              )}
             </div>
           </div>
         )}

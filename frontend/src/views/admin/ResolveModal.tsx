@@ -10,6 +10,7 @@
 
 import { useState } from "react";
 import { EscrowTask } from "../../types/task";
+import { classifyError, ClassifiedError } from "../../utils/errorUtils";
 
 function truncateMiddle(value: string, head = 6, tail = 4): string {
   if (value.length <= head + tail + 1) return value;
@@ -24,7 +25,7 @@ interface ResolveModalProps {
 
 export function ResolveModal({ task, onResolve, onClose }: ResolveModalProps) {
   const [isResolving, setIsResolving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ClassifiedError | null>(null);
 
   const handleResolve = async (outcome: "Worker" | "Payer") => {
     setIsResolving(true);
@@ -32,7 +33,7 @@ export function ResolveModal({ task, onResolve, onClose }: ResolveModalProps) {
     try {
       await onResolve(task.task_id, outcome);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Resolution failed");
+      setError(classifyError(err));
       setIsResolving(false);
     }
   };
@@ -99,9 +100,14 @@ export function ResolveModal({ task, onResolve, onClose }: ResolveModalProps) {
         )}
 
         {error && (
-          <p className="field-error" style={{ marginTop: "0.5rem" }}>
-            {error}
-          </p>
+          <div className="field-error" style={{ marginTop: "0.5rem" }}>
+            <p>{error.message}</p>
+            {error.isRetryable && (
+              <p style={{ fontSize: "0.8rem", marginTop: "0.25rem", color: "#e0af68" }}>
+                You can try again.
+              </p>
+            )}
+          </div>
         )}
 
         <div className="modal-actions">

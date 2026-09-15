@@ -12,6 +12,7 @@ import { useTruvoSDK } from "../sdk/TruvoContext";
 import { EscrowTask } from "../types/task";
 import { CreateTaskForm, CreateTaskFields } from "./requester/CreateTaskForm";
 import { EscrowStatusList } from "./requester/EscrowStatusList";
+import { classifyError, ClassifiedError } from "../utils/errorUtils";
 
 /** localStorage key for tracking created task IDs. */
 const TASK_IDS_KEY = "truvo_requester_task_ids";
@@ -34,7 +35,7 @@ export default function Requester() {
   const sdk = useTruvoSDK();
   const [tasks, setTasks] = useState<EscrowTask[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ClassifiedError | null>(null);
 
   /** Fetch all tracked tasks from on-chain storage. */
   const refreshTasks = useCallback(async () => {
@@ -57,7 +58,7 @@ export default function Requester() {
       }
       setTasks(fetched);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch tasks");
+      setError(classifyError(err));
     } finally {
       setIsLoading(false);
     }
@@ -104,9 +105,7 @@ export default function Requester() {
         // Add the new task to the list
         setTasks((prev) => [...prev, result.task as EscrowTask]);
       } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to create task",
-        );
+        setError(classifyError(err));
       } finally {
         setIsLoading(false);
       }
@@ -135,7 +134,7 @@ export default function Requester() {
       </p>
       {error && (
         <div
-          className="worker-alert-success"
+          className="worker-alert-success error-alert"
           style={{
             backgroundColor: "rgba(247, 118, 142, 0.1)",
             borderColor: "rgba(247, 118, 142, 0.35)",
@@ -144,7 +143,12 @@ export default function Requester() {
         >
           <div>
             <strong>Error</strong>
-            <p>{error}</p>
+            <p>{error.message}</p>
+            {error.isRetryable && (
+              <p style={{ fontSize: "0.8rem", marginTop: "0.5rem", color: "#e0af68" }}>
+                This error may be temporary. You can try again.
+              </p>
+            )}
           </div>
           <button className="btn-dismiss" onClick={() => setError(null)}>
             ×
