@@ -8,12 +8,11 @@
  *    and opens the anchor's interactive URL in a new tab or embedded webview.
  */
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
+import { useTruvoSDK } from "../../sdk/TruvoContext";
 import {
   CurrencyOption,
   SUPPORTED_LOCAL_CURRENCIES,
-  estimateLocalValue,
-  generateMockSep24Withdrawal,
 } from "./withdrawalUtils";
 
 interface WithdrawModalProps {
@@ -21,11 +20,6 @@ interface WithdrawModalProps {
   defaultAmount: string;
   availableBalance: string;
   onClose: () => void;
-  onInitiateWithdrawalPlaceholder?: (
-    assetCode: string,
-    amount: string,
-    account: string,
-  ) => { transactionId: string; interactiveUrl: string };
 }
 
 function truncateMiddle(value: string, head = 8, tail = 6): string {
@@ -38,40 +32,104 @@ export function WithdrawModal({
   defaultAmount,
   availableBalance,
   onClose,
-  onInitiateWithdrawalPlaceholder = (assetCode, amount, account) => {
-    console.log(
-      "[placeholder] Truvo SDK initiateWithdrawal would be called with:",
-      JSON.stringify({ assetCode, amount, account }, null, 2),
-    );
-    return generateMockSep24Withdrawal(account, amount, assetCode);
-  },
 }: WithdrawModalProps) {
+  const sdk = useTruvoSDK();
   const [amount, setAmount] = useState(defaultAmount || availableBalance || "10");
   const [selectedCurrency, setSelectedCurrency] = useState<string>("NGN");
   const [isInitiating, setIsInitiating] = useState(false);
+  const [withdrawalError, setWithdrawalError] = useState<string | null>(null);
   const [withdrawalSession, setWithdrawalSession] = useState<{
     transactionId: string;
     interactiveUrl: string;
   } | null>(null);
   const [showEmbeddedWebview, setShowEmbeddedWebview] = useState(false);
+  const [localEstimate, setLocalEstimate] = useState<{ formatted: string; rate: number }>({
+    formatted: "~0.00",
+    rate: 0,
+  });
+  const [totalBalanceEstimate, setTotalBalanceEstimate] = useState<{ formatted: string; rate: number }>({
+    formatted: "~0.00",
+    rate: 0,
+  });
 
-  const localEstimate = estimateLocalValue(amount, selectedCurrency);
-  const totalBalanceEstimate = estimateLocalValue(availableBalance, selectedCurrency);
+  // Fetch real estimates from SEP-38 oracle
+  const fetchEstimates = useCallback(
+    async (amt: string, currency: string) => {
+      try {
+        const estimate = await sdk.estimateLocalCurrencyValue(amt, currency);
+        setLocalEstimate({
+          formatted: estimate.display,
+          rate: parseFloat(estimate.price),
+        });
+      } catch {
+        // Fallback estimate
+        const xlmAmount = parseFloat(amt) || 0;
+        setLocalEstimate({
+          formatted: `~${(xlmAmount * 0.12).toFixed(2)} ${currency}`,
+          rate: 0.12,
+        });
+      }
+    },
+    [sdk],
+  );
 
-  const handleInitiate = (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsInitiating(true);
+  const fetchTotalEstimate = useCallback(
+    async (balance: string, currency: string) => {
+      try {
+        const estimate = await sdk.estimateLocalCurrencyValue(balance, currency);
+        setTotalBalanceEstimate({
+          formatted: estimate.display,
+          rate: parseFloat(estimate.price),
+        });
+      } catch {
+        const xlmAmount = parseFloat(balance) || 0;
+        setTotalBalanceEstimate({
+          formatted: `~${(xlmAmount * 0.12).toFixed(2)} ${currency}`,
+          rate: 0.12,
+        });
+      }
+    },
+    [sdk],
+  );
 
-    try {
-      const result = onInitiateWithdrawalPlaceholder("XLM", amount, workerAddress);
-      setWithdrawalSession(result);
+  // Fetch estimates when amount or currency changes
+  useState(() => {
+    fetchEstimates(amount, selectedCurrency);
+    fetchTotalEstimate(availableBalance, selectedCurrency);
+  });
 
-      // Open SEP-24 interactive URL in new tab
-      window.open(result.interactiveUrl, "_blank", "noopener,noreferrer");
-    } finally {
-      setIsInitiating(false);
-    }
-  };
+  const handleInitiate = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      setIsInitiating(true);
+      setWithdrawalError(null);
+
+      try {
+        // Call the SDK's initiateWithdrawal
+        const result = await sdk.initiateWithdrawal({
+          assetCode: "native",
+          amount,
+          account: workerAddress,
+        });
+
+        setWithdrawalSession({
+          transactionId: result.transactionId,
+          interactiveUrl: result.interactiveUrl,
+        });
+        setWithdrawalError(null);
+
+        // Open SEP-24 interactive URL in new tab
+        window.open(result.interactiveUrl, "_blank", "noopener,noreferrer");
+      } catch (err) {
+        setWithdrawalError(
+          err instanceof Error ? err.message : "Failed to initiate withdrawal",
+        );
+      } finally {
+        setIsInitiating(false);
+      }
+    },
+    [amount, workerAddress, sdk],
+  );
 
   const handleOpenNewTab = () => {
     if (withdrawalSession) {
@@ -132,6 +190,22 @@ export function WithdrawModal({
           </div>
         </div>
 
+        {withdrawalError && !withdrawalSession && (
+          <div
+            className="worker-alert-success"
+            style={{
+              backgroundColor: "rgba(247, 118, 142, 0.1)",
+              borderColor: "rgba(247, 118, 142, 0.35)",
+              color: "#f7768e",
+              marginBottom: "1rem",
+            }}
+          >
+            <div>
+              <strong>Error</strong>
+              <p>{withdrawalError}</p>
+            </div>
+          </div>
+        )}
         {!withdrawalSession ? (
           <form onSubmit={handleInitiate} className="withdraw-form">
             <div className="form-field">

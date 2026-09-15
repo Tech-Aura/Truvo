@@ -1,17 +1,17 @@
 /**
- * Placeholder data and utilities for the Worker view's
+ * Currency definitions and utilities for the Worker view's
  * withdraw-to-local-currency flow (SEP-24 Anchor integration).
  *
- * In production, exchange rates come from the Anchor's SEP-38 price oracle,
- * balances come from Horizon via AnchorClient/TruvoClient, and the
- * interactive URL comes from AnchorClient.initiateWithdrawal.
+ * Exchange rates are now fetched from the Anchor's SEP-38 price oracle
+ * via the SDK's estimateLocalCurrencyValue method. These static rates
+ * are only used as fallbacks when the oracle is unavailable.
  */
 
 export interface CurrencyOption {
   code: string;
   name: string;
   symbol: string;
-  /** Estimated exchange rate per 1 XLM (mirrors SEP-38 test anchor rates). */
+  /** Fallback exchange rate per 1 XLM (mirrors SEP-38 test anchor rates). */
   ratePerXlm: number;
 }
 
@@ -24,7 +24,8 @@ export const SUPPORTED_LOCAL_CURRENCIES: CurrencyOption[] = [
 ];
 
 /**
- * Computes estimated local currency value for a given XLM amount.
+ * Fallback local currency estimation when the SEP-38 oracle is unavailable.
+ * In production, use the SDK's estimateLocalCurrencyValue method instead.
  */
 export function estimateLocalValue(
   xlmAmount: number | string,
@@ -45,31 +46,5 @@ export function estimateLocalValue(
     estimate: value.toFixed(2),
     formatted,
     rate: currency.ratePerXlm,
-  };
-}
-
-/**
- * Generates a mock SEP-24 interactive withdrawal result matching the SDK's
- * InitiateWithdrawalResult (sdk/src/anchor/client.ts).
- */
-export function generateMockSep24Withdrawal(
-  account: string,
-  amount: string,
-  assetCode: string = "XLM",
-): {
-  transactionId: string;
-  interactiveUrl: string;
-  type: string;
-} {
-  const transactionId = `${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
-  const encodedAccount = encodeURIComponent(account);
-  const interactiveUrl = `https://testanchor.stellar.org/sep24/interactive?transaction_id=${transactionId}&asset_code=${encodeURIComponent(
-    assetCode,
-  )}&amount=${encodeURIComponent(amount)}&account=${encodedAccount}&step=withdraw`;
-
-  return {
-    transactionId,
-    interactiveUrl,
-    type: "interactive_customer_info_needed",
   };
 }

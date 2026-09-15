@@ -353,7 +353,7 @@ export class TruvoClient {
 
     // Read the newly created task from contract storage so we return
     // the authoritative on-chain state.
-    const task = await this.readTask(input.taskId);
+    const task = await this.getTask(input.taskId);
 
     return { task, txHash: sendResult.hash };
   }
@@ -421,7 +421,7 @@ export class TruvoClient {
 
     await this.waitForTransaction(sendResult.hash);
 
-    const task = await this.readTask(input.taskId);
+    const task = await this.getTask(input.taskId);
 
     return { task, txHash: sendResult.hash };
   }
@@ -485,7 +485,7 @@ export class TruvoClient {
     }
 
     const meta = await this.waitForTransactionGetMeta(sendResult.hash);
-    const task = await this.readTask(input.taskId);
+    const task = await this.getTask(input.taskId);
 
     // Parse the `task_released` event for authoritative transfer details.
     // Event data: (task_id, worker, amount)
@@ -564,7 +564,7 @@ export class TruvoClient {
     }
 
     const meta = await this.waitForTransactionGetMeta(sendResult.hash);
-    const task = await this.readTask(input.taskId);
+    const task = await this.getTask(input.taskId);
 
     // Parse the `task_refunded` event for authoritative refund details.
     // Event data: (task_id, payer, amount)
@@ -668,7 +668,7 @@ export class TruvoClient {
     }
 
     await this.waitForTransaction(sendResult.hash);
-    const task = await this.readTask(input.taskId);
+    const task = await this.getTask(input.taskId);
 
     return { task, txHash: sendResult.hash };
   }
@@ -741,7 +741,7 @@ export class TruvoClient {
     }
 
     await this.waitForTransaction(sendResult.hash);
-    const task = await this.readTask(input.taskId);
+    const task = await this.getTask(input.taskId);
 
     return { task, txHash: sendResult.hash };
   }
@@ -800,8 +800,11 @@ export class TruvoClient {
    *
    * The storage key mirrors the contract's `task_key` function:
    * `Bytes::from_array(env, &task_id.to_array())` → `ScVal.scvBytes(32-byte buffer)`.
+   *
+   * @param taskId - 32-byte task identifier as a 64-character hex string.
+   * @returns The decoded {@link Task} from on-chain storage.
    */
-  private async readTask(taskId: string): Promise<Task> {
+  async getTask(taskId: string): Promise<Task> {
     const key = xdr.ScVal.scvBytes(Buffer.from(taskId, "hex"));
     const entry = await retryWithBackoff(
       () => this.server.getContractData(
