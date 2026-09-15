@@ -1081,3 +1081,111 @@
   border: none;
   background-color: #ffffff;
 }
+
+/* Error Alert Styles */
+.error-alert {
+  border-radius: 10px;
+  padding: 0.85rem 1.1rem;
+  margin-bottom: 1.25rem;
+  font-size: 0.88rem;
+}
+
+.error-alert p {
+  margin: 0.25rem 0 0;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.error-network {
+  background-color: rgba(224, 175, 104, 0.1);
+  border: 1px solid rgba(224, 175, 104, 0.35);
+  color: #e0af68;
+}
+
+.error-contract {
+  background-color: rgba(247, 118, 142, 0.1);
+  border: 1px solid rgba(247, 118, 142, 0.35);
+  color: #f7768e;
+}
+
+.error-auth {
+  background-color: rgba(187, 154, 247, 0.1);
+  border: 1px solid rgba(187, 154, 247, 0.35);
+  color: #bb9af7;
+}
+
+.error-api {
+  background-color: rgba(122, 162, 247, 0.1);
+  border: 1px solid rgba(122, 162, 247, 0.35);
+  color: #7aa2f7;
+}
+
+.error-unknown {
+  background-color: rgba(247, 118, 142, 0.1);
+  border: 1px solid rgba(247, 118, 142, 0.35);
+  color: #f7768e;
+}
+
+/* Loading Spinner */
+.loading-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  border-top-color: #ffffff;
+  animation: spin 1s ease-in-out infinite;
+  margin-right: 0.5rem;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .app {
+    padding: 0 0.75rem;
+  }
+
+  .navbar {
+    gap: 1rem;
+  }
+
+  .nav-links {
+    gap: 0.25rem;
+  }
+
+  .modal-container {
+    max-width: 100%;
+    margin: 0.5rem;
+    padding: 1rem;
+  }
+
+  .worker-earnings-card {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .withdraw-balance-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .worker-summary-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .task-filters {
+    width: 100%;
+  }
+
+  .escrow-list table {
+    font-size: 0.8rem;
+  }
+
+  .escrow-list th,
+  .escrow-list td {
+    padding: 0.5em 0.6em;
+  }
+}

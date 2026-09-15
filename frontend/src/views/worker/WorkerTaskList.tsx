@@ -13,6 +13,7 @@ import { EscrowTask, TaskStatus } from "../../types/task";
 import { useTruvoSDK } from "../../sdk/TruvoContext";
 import { SubmitProofModal } from "./SubmitProofModal";
 import { WithdrawModal } from "./WithdrawModal";
+import { classifyError, ClassifiedError } from "../../utils/errorUtils";
 
 /** Status display metadata matching contract codes. */
 const STATUS_META: Record<TaskStatus, { label: string; badgeClass: string }> = {
@@ -83,7 +84,7 @@ export function WorkerTaskList({
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [taskList, setTaskList] = useState<EscrowTask[]>(customTasks ?? []);
   const [isLoading, setIsLoading] = useState(false);
-  const [, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ClassifiedError | null>(null);
   const [selectedTaskForProof, setSelectedTaskForProof] =
     useState<EscrowTask | null>(null);
   const [selectedTaskForWithdraw, setSelectedTaskForWithdraw] =
@@ -119,7 +120,7 @@ export function WorkerTaskList({
 
       setTaskList(fetched);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch tasks");
+      setError(classifyError(err));
     } finally {
       setIsLoading(false);
     }
@@ -207,9 +208,7 @@ export function WorkerTaskList({
         setSuccessNotice({ taskId, proofHash });
         setSelectedTaskForProof(null);
       } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to confirm task",
-        );
+        setError(classifyError(err));
       }
     },
     [sdk],
@@ -316,6 +315,37 @@ export function WorkerTaskList({
         </div>
       </div>
 
+      {/* Error Notification Banner */}
+      {error && (
+        <div
+          className="worker-alert-success error-alert"
+          role="alert"
+          style={{
+            backgroundColor: "rgba(247, 118, 142, 0.1)",
+            borderColor: "rgba(247, 118, 142, 0.35)",
+            color: "#f7768e",
+          }}
+        >
+          <div>
+            <strong>Error</strong>
+            <p>{error.message}</p>
+            {error.isRetryable && (
+              <p style={{ fontSize: "0.8rem", marginTop: "0.5rem", color: "#e0af68" }}>
+                This error may be temporary. You can try again.
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            className="btn-dismiss"
+            onClick={() => setError(null)}
+            aria-label="Dismiss error"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {/* Success Notification Banner */}
       {successNotice && (
         <div className="worker-alert-success" role="status">
@@ -325,7 +355,7 @@ export function WorkerTaskList({
               Task <code className="mono">{truncateMiddle(successNotice.taskId)}</code>{" "}
               is now <strong>Confirmed</strong>. Proof hash:{" "}
               <code className="mono">{truncateMiddle(successNotice.proofHash, 10, 8)}</code>{" "}
-              has been recorded (placeholder). The requester can now verify the
+              has been recorded. The requester can now verify the
               proof and release funds.
             </p>
           </div>

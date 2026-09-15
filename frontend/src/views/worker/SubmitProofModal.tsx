@@ -10,6 +10,7 @@
 import { ChangeEvent, useState, useEffect } from "react";
 import { EscrowTask } from "../../types/task";
 import { computeProofHash, isValidProofHash } from "./proofUtils";
+import { classifyError, ClassifiedError } from "../../utils/errorUtils";
 
 interface SubmitProofModalProps {
   task: EscrowTask;
@@ -36,7 +37,7 @@ export function SubmitProofModal({
   const [isHashing, setIsHashing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ClassifiedError | null>(null);
 
   // Compute hash whenever proofText changes in "text" mode
   useEffect(() => {
@@ -59,7 +60,7 @@ export function SubmitProofModal({
       })
       .catch((err) => {
         if (isMounted) {
-          setError(`Failed to compute hash: ${err instanceof Error ? err.message : String(err)}`);
+          setError(classifyError(err));
         }
       })
       .finally(() => {
@@ -89,7 +90,7 @@ export function SubmitProofModal({
       const hash = await computeProofHash(buffer);
       setComputedHash(hash);
     } catch (err) {
-      setError(`Failed to hash file: ${err instanceof Error ? err.message : String(err)}`);
+      setError(classifyError(err));
       setComputedHash("");
     } finally {
       setIsHashing(false);
@@ -110,7 +111,7 @@ export function SubmitProofModal({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!isValidProofHash(computedHash)) {
-      setError("A valid 32-byte SHA-256 proof hash is required.");
+      setError(classifyError(new Error("A valid 32-byte SHA-256 proof hash is required.")));
       return;
     }
 
@@ -295,7 +296,16 @@ export function SubmitProofModal({
             )}
           </div>
 
-          {error && <p className="field-error">{error}</p>}
+          {error && (
+            <div className="field-error">
+              <p>{error.message}</p>
+              {error.isRetryable && (
+                <p style={{ fontSize: "0.8rem", marginTop: "0.25rem", color: "#e0af68" }}>
+                  You can try again.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Form action buttons */}
           <div className="modal-actions">
