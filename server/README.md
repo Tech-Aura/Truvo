@@ -126,6 +126,41 @@ npm install
 npm run dev
 ```
 
+## Autonomous Demo Agent
+
+The server includes an autonomous demo agent that demonstrates the x402 payment flow:
+
+```bash
+# Start the agent
+npm run agent
+
+# Or with custom configuration
+SERVER_URL=http://localhost:3001 QUEUE_FILE=tasks-queue.json npm run agent
+```
+
+The agent will:
+1. Read pending tasks from `tasks-queue.json`
+2. For each task, call the x402-protected endpoint
+3. Automatically handle the 402 response and payment flow
+4. Update the queue with results
+
+To add tasks to the queue, edit `tasks-queue.json`:
+
+```json
+{
+  "tasks": [
+    {
+      "id": "task_1",
+      "worker": "GABC123...",
+      "amount": "10",
+      "deadline": 1234567890,
+      "status": "pending"
+    }
+  ],
+  "lastProcessed": "2024-01-01T00:00:00.000Z"
+}
+```
+
 ## Testing
 
 ```bash

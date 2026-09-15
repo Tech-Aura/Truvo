@@ -1,0 +1,14 @@
+{
+  "tasks": [
+    {
+      "id": "task_demo_1",
+      "worker": "GABC12345678901234567890123456789012345678901234",
+      "amount": "10",
+      "deadline": 1735689600,
+      "status": "pending",
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z"
+    }
+  ],
+  "lastProcessed": "2024-01-01T00:00:00.000Z"
+}
