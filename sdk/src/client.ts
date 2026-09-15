@@ -8,7 +8,7 @@
 import {
   Contract,
   Keypair,
-  SorobanRpc,
+  rpc as SorobanRpc,
   TransactionBuilder,
   xdr,
   Address,
@@ -22,7 +22,7 @@ import {
 } from "./errors";
 import { retryWithBackoff, DEFAULT_MAX_RETRIES } from "./retry";
 
-type ApiGetTxStatus = typeof SorobanRpc.Api.GetTransactionStatus;
+type ApiGetTxStatus = SorobanRpc.Api.GetTransactionStatus;
 type ApiFailedTx = SorobanRpc.Api.GetFailedTransactionResponse;
 
 // ============================================================================
@@ -810,7 +810,7 @@ export class TruvoClient {
       () => this.server.getContractData(
         this.contractId,
         key,
-        SorobanRpc.Durability.Persistent,
+        (SorobanRpc as any).Durability.Persistent,
       ),
       "getContractData",
       this.maxRetries,

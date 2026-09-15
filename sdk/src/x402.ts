@@ -16,7 +16,7 @@ import {
   TransactionBuilder,
   Operation,
   Asset,
-  SorobanRpc,
+  rpc as SorobanRpc,
   Transaction,
 } from "@stellar/stellar-sdk";
 

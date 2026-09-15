@@ -71,4 +71,14 @@ export {
   type SettlementResponse,
 } from "./x402";
 
+export {
+  MppSessionClient,
+  createMppSessionClient,
+  isMppSessionConfigured,
+  type MppSessionConfig,
+  type MppSessionEvent,
+  type MppBatchResult,
+  type MppSessionSummary,
+} from "./mpp-session";
+
 export const SDK_VERSION = "0.3.0";
