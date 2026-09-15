@@ -1151,21 +1151,58 @@
 
   .navbar {
     gap: 1rem;
+    padding: 0.5rem 0;
+  }
+
+  .nav-brand h1 {
+    font-size: 1rem;
   }
 
   .nav-links {
     gap: 0.25rem;
+    order: 3;
+    width: 100%;
+    justify-content: center;
+  }
+
+  .nav-links a {
+    padding: 0.25em 0.6em;
+    font-size: 0.85rem;
+  }
+
+  .wallet-widget {
+    order: 2;
   }
 
   .modal-container {
     max-width: 100%;
     margin: 0.5rem;
     padding: 1rem;
+    max-height: 85vh;
+  }
+
+  .modal-header {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .modal-actions {
+    flex-direction: column;
+  }
+
+  .modal-actions button {
+    width: 100%;
   }
 
   .worker-earnings-card {
     flex-direction: column;
     align-items: flex-start;
+    padding: 1rem;
+  }
+
+  .earnings-values {
+    flex-direction: column;
+    gap: 0.25rem;
   }
 
   .withdraw-balance-cards {
@@ -1173,19 +1210,139 @@
   }
 
   .worker-summary-cards {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.5rem;
+  }
+
+  .summary-card {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .summary-value {
+    font-size: 1.1rem;
   }
 
   .task-filters {
     width: 100%;
+    justify-content: flex-start;
+  }
+
+  .filter-btn {
+    padding: 0.25em 0.6em;
+    font-size: 0.75rem;
   }
 
   .escrow-list table {
-    font-size: 0.8rem;
+    font-size: 0.78rem;
   }
 
   .escrow-list th,
   .escrow-list td {
-    padding: 0.5em 0.6em;
+    padding: 0.4em 0.5em;
+  }
+
+  .table-scroll {
+    border-radius: 8px;
+  }
+
+  .task-proof-summary {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .summary-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.2rem;
+  }
+
+  .input-mode-tabs {
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .mode-tab {
+    width: 100%;
+    text-align: center;
+  }
+
+  .session-action-buttons {
+    flex-direction: column;
+  }
+
+  .session-action-buttons button {
+    width: 100%;
+  }
+
+  .proof-explanation-card {
+    padding: 0.75rem;
+  }
+
+  .explanation-list {
+    padding-left: 1rem;
+  }
+}
+
+/* Extra small screens */
+@media (max-width: 480px) {
+  .worker-summary-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .summary-card {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .escrow-list th:nth-child(n+4),
+  .escrow-list td:nth-child(n+4) {
+    display: none;
+  }
+
+  .escrow-list th:first-child,
+  .escrow-list td:first-child {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .balance-item {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .anchor-badge-banner {
+    padding: 0.75rem;
+  }
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+  .status-badge {
+    border-width: 2px;
+  }
+
+  .btn-action {
+    border: 1px solid currentColor;
+  }
+
+  .filter-btn {
+    border-width: 2px;
+  }
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  .loading-spinner {
+    animation: none;
+  }
+
+  .pulse-dot {
+    animation: none;
+    box-shadow: none;
+  }
+
+  * {
+    transition-duration: 0.01ms !important;
   }
 }
