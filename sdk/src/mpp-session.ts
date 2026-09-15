@@ -24,6 +24,7 @@
  */
 
 import { Keypair, Networks } from "@stellar/stellar-sdk";
+import { createLogger, Stages, type TruvoLogger } from "./logger";
 
 // ============================================================================
 // MPP Session Types
@@ -133,6 +134,8 @@ export class MppSessionClient {
   /** The funder (commitment signer) public key. */
   private funderAddress: string;
 
+  readonly log: TruvoLogger;
+
   constructor(config: MppSessionConfig) {
     this.commitmentKey = config.commitmentKey;
     this.networkPassphrase = config.networkPassphrase || Networks.TESTNET;
@@ -140,6 +143,7 @@ export class MppSessionClient {
     this.horizonUrl = config.horizonUrl || "https://horizon-testnet.stellar.org";
     this.onProgress = config.onProgress;
     this.funderAddress = this.commitmentKey.publicKey();
+    this.log = createLogger("sdk.mpp-session");
   }
 
   /** The commitment signer's public key. */
@@ -307,8 +311,16 @@ export class MppSessionClient {
       amount: string;
       deadline: number;
     },
+    taskId?: string,
   ): Promise<MppBatchResult> {
     const url = `${serverUrl}/api/tasks`;
+    const log = taskId ? this.log.child(taskId) : this.log;
+
+    log.info(Stages.MPP_COMMITMENT_SIGNED, {
+      cumulativeAmount: (this.cumulativeAmount + BigInt("1000000")).toString(),
+      worker: taskDetails.worker,
+      amount: taskDetails.amount,
+    });
 
     try {
       const response = await this.payAndFetch(url, {
@@ -319,6 +331,10 @@ export class MppSessionClient {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({})) as Record<string, unknown>;
+        log.error(Stages.MPP_PAYMENT_SERVED, {
+          status: response.status,
+          error: (errorData.message as string) || `HTTP ${response.status}`,
+        });
         return {
           taskId: "",
           success: false,
@@ -328,6 +344,11 @@ export class MppSessionClient {
       }
 
       const data = await response.json() as Record<string, unknown>;
+      log.info(Stages.MPP_PAYMENT_SERVED, {
+        taskId: data.taskId as string,
+        txHash: data.txHash as string,
+        cumulativeAmount: this.cumulativeAmount.toString(),
+      });
       return {
         taskId: (data.taskId as string) || "",
         txHash: data.txHash as string | undefined,
@@ -335,6 +356,9 @@ export class MppSessionClient {
         success: true,
       };
     } catch (error) {
+      log.error(Stages.MPP_PAYMENT_SERVED, {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return {
         taskId: "",
         success: false,

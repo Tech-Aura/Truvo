@@ -26,6 +26,19 @@ import { MppSessionClient } from "../../sdk/src/mpp-session";
 import * as fs from "fs";
 import * as path from "path";
 
+// Structured logger for the agent component
+function log(level: string, stage: string, taskId?: string, meta?: Record<string, unknown>) {
+  const entry: Record<string, unknown> = {
+    timestamp: new Date().toISOString(),
+    level,
+    component: "agent",
+    stage,
+    correlation_id: taskId,
+    ...meta,
+  };
+  process.stderr.write(JSON.stringify(entry) + "\n");
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -139,38 +152,53 @@ async function processTaskWithX402(
   x402Client: X402Client,
   task: PendingTask
 ): Promise<PendingTask> {
-  console.log(`\n🔄 [x402] Processing task ${task.id}...`);
-  console.log(`   Worker: ${task.worker}`);
-  console.log(`   Amount: ${task.amount} XLM`);
-  console.log(`   Deadline: ${new Date(task.deadline * 1000).toISOString()}`);
+  log("info", "agent.task_processing", task.id, {
+    worker: task.worker,
+    amount: task.amount,
+    deadline: task.deadline,
+    paymentMethod: "x402",
+  });
 
   task.status = "processing";
   task.paymentMethod = "x402";
   task.updatedAt = new Date().toISOString();
 
   try {
+    log("info", "x402.request_initiated", task.id, {
+      url: `${SERVER_URL}/api/tasks`,
+      method: "POST",
+    });
+
     const result = await x402Client.createTaskWithPayment(SERVER_URL, {
       worker: task.worker,
       amount: task.amount,
       deadline: task.deadline,
-    });
+    }, task.id);
 
     if (result.success) {
-      console.log(`✅ [x402] Task ${task.id} created successfully!`);
-      console.log(`   Task ID: ${result.taskId}`);
-      console.log(`   TX Hash: ${result.txHash}`);
+      log("info", "x402.payment_settled", task.id, {
+        taskId: result.taskId,
+        txHash: result.txHash,
+      });
+
+      log("info", "escrow.created", task.id, {
+        onChainTaskId: result.taskId,
+        txHash: result.txHash,
+      });
 
       task.status = "completed";
       task.txHash = result.txHash;
     } else {
-      console.error(`❌ [x402] Task ${task.id} failed: ${result.error}`);
+      log("error", "x402.payment_failed", task.id, {
+        error: result.error,
+      });
 
       task.status = "failed";
       task.error = result.error;
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error(`❌ [x402] Task ${task.id} error: ${errorMessage}`);
+    log("error", "x402.payment_failed", task.id, { error: errorMessage });
 
     task.status = "failed";
     task.error = errorMessage;
@@ -187,8 +215,11 @@ async function processBatchWithMppSession(
   mppClient: MppSessionClient,
   tasks: PendingTask[]
 ): Promise<PendingTask[]> {
-  console.log(`\n🚀 [MPP Session] Processing batch of ${tasks.length} tasks...`);
-  console.log(`   Funder: ${mppClient.publicKey}`);
+  log("info", "agent.batch_started", undefined, {
+    taskCount: tasks.length,
+    funder: mppClient.publicKey,
+    paymentMethod: "mpp-session",
+  });
 
   // Mark all as processing
   for (const task of tasks) {
@@ -213,13 +244,23 @@ async function processBatchWithMppSession(
       const result = batchResults[i];
 
       if (result.success) {
-        console.log(`✅ [MPP Session] Task ${task.id} created!`);
-        console.log(`   Task ID: ${result.taskId}`);
+        log("info", "mpp.payment_served", task.id, {
+          taskId: result.taskId,
+          txHash: result.txHash,
+          cumulativeAmount: result.cumulativeAmount,
+        });
+
+        log("info", "escrow.created", task.id, {
+          onChainTaskId: result.taskId,
+          txHash: result.txHash,
+        });
 
         task.status = "completed";
         task.txHash = result.txHash;
       } else {
-        console.error(`❌ [MPP Session] Task ${task.id} failed: ${result.error}`);
+        log("error", "mpp.payment_failed", task.id, {
+          error: result.error,
+        });
 
         task.status = "failed";
         task.error = result.error;
@@ -230,13 +271,15 @@ async function processBatchWithMppSession(
 
     // Log session summary
     const summary = mppClient.getSummary();
-    console.log(`\n📊 [MPP Session] Batch complete:`);
-    console.log(`   Requests: ${summary.requestCount}`);
-    console.log(`   Cumulative committed: ${summary.cumulativeAmount} base units`);
+    log("info", "agent.batch_completed", undefined, {
+      requestCount: summary.requestCount,
+      cumulativeAmount: summary.cumulativeAmount,
+      channel: summary.channel,
+    });
 
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error(`❌ [MPP Session] Batch error: ${errorMessage}`);
+    log("error", "agent.batch_error", undefined, { error: errorMessage });
 
     // Mark all remaining tasks as failed
     for (const task of tasks) {

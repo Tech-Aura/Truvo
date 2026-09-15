@@ -19,6 +19,7 @@ import {
   rpc as SorobanRpc,
   Transaction,
 } from "@stellar/stellar-sdk";
+import { createLogger, Stages, type TruvoLogger } from "./logger";
 
 // ============================================================================
 // x402 Types (based on x402 V2 specification)
@@ -94,6 +95,7 @@ export class X402Client {
   private readonly horizonUrl: string;
   private readonly maxRetries: number;
   private readonly rpcServer: SorobanRpc.Server;
+  readonly log: TruvoLogger;
 
   constructor(config: X402ClientConfig) {
     this.keypair = Keypair.fromSecret(config.secretKey);
@@ -101,6 +103,7 @@ export class X402Client {
     this.horizonUrl = config.horizonUrl || "https://horizon-testnet.stellar.org";
     this.maxRetries = config.maxRetries || 3;
     this.rpcServer = new SorobanRpc.Server("https://soroban-testnet.stellar.org");
+    this.log = createLogger("sdk.x402");
   }
 
   /**
@@ -122,9 +125,13 @@ export class X402Client {
    */
   async fetchWithPayment(
     url: string,
-    options: RequestInit = {}
+    options: RequestInit = {},
+    taskId?: string,
   ): Promise<Response> {
     let lastError: Error | null = null;
+    const log = taskId ? this.log.child(taskId) : this.log;
+
+    log.info(Stages.X402_REQUEST_INITIATED, { url, method: options.method || "GET" });
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
@@ -133,8 +140,11 @@ export class X402Client {
 
         // If not a 402, return the response directly
         if (response.status !== 402) {
+          log.debug("x402.non_402_response", { status: response.status });
           return response;
         }
+
+        log.info(Stages.X402_CHALLENGE_RECEIVED, { status: 402 });
 
         // Parse the 402 response
         const paymentRequired = await this.parsePaymentRequired(response);
@@ -145,16 +155,36 @@ export class X402Client {
         // Create and sign the payment transaction
         const paymentPayload = await this.createPaymentPayload(paymentRequirement);
 
+        log.info(Stages.X402_PAYMENT_CONSTRUCTED, {
+          scheme: paymentPayload.scheme,
+          network: paymentPayload.network,
+          amount: paymentPayload.payload.amount,
+          destination: paymentPayload.payload.destination,
+          sourceAccount: paymentPayload.payload.sourceAccount,
+        });
+
         // Retry the request with the payment signature
         const retryResponse = await this.retryWithPayment(url, options, paymentPayload);
+
+        log.info(Stages.X402_PAYMENT_SUBMITTED, {
+          status: retryResponse.status,
+          nonce: paymentPayload.payload.nonce,
+        });
 
         // If still 402, payment verification failed
         if (retryResponse.status === 402) {
           const settlementResponse = await this.parseSettlementResponse(retryResponse);
           if (!settlementResponse.success) {
+            log.error(Stages.X402_PAYMENT_FAILED, {
+              reason: settlementResponse.errorReason,
+            });
             throw new Error(`Payment failed: ${settlementResponse.errorReason}`);
           }
         }
+
+        log.info(Stages.X402_PAYMENT_SETTLED, {
+          status: retryResponse.status,
+        });
 
         return retryResponse;
       } catch (error) {
@@ -162,8 +192,18 @@ export class X402Client {
 
         // If this was the last attempt, throw the error
         if (attempt === this.maxRetries) {
+          log.error(Stages.X402_PAYMENT_FAILED, {
+            error: lastError.message,
+            attemptsExhausted: attempt + 1,
+          });
           throw lastError;
         }
+
+        log.warn(Stages.X402_RETRY, {
+          attempt: attempt + 1,
+          maxRetries: this.maxRetries,
+          error: lastError.message,
+        });
 
         // Wait before retrying (exponential backoff)
         await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
@@ -318,9 +358,18 @@ export class X402Client {
       worker: string;
       amount: string;
       deadline: number;
-    }
+    },
+    taskId?: string,
   ): Promise<{ success: boolean; taskId?: string; txHash?: string; error?: string }> {
     const url = `${serverUrl}/api/tasks`;
+    const log = taskId ? this.log.child(taskId) : this.log;
+
+    log.info(Stages.X402_REQUEST_INITIATED, {
+      url,
+      worker: taskDetails.worker,
+      amount: taskDetails.amount,
+      deadline: taskDetails.deadline,
+    });
 
     const response = await this.fetchWithPayment(url, {
       method: "POST",
@@ -328,10 +377,14 @@ export class X402Client {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(taskDetails),
-    });
+    }, taskId);
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({})) as Record<string, unknown>;
+      log.error(Stages.X402_PAYMENT_FAILED, {
+        status: response.status,
+        error: (errorData.message as string) || `HTTP ${response.status}`,
+      });
       return {
         success: false,
         error: (errorData.message as string) || `HTTP ${response.status}`,
@@ -339,6 +392,10 @@ export class X402Client {
     }
 
     const data = await response.json() as Record<string, unknown>;
+    log.info(Stages.X402_PAYMENT_SETTLED, {
+      taskId: data.taskId as string,
+      txHash: data.txHash as string,
+    });
     return {
       success: true,
       taskId: data.taskId as string,

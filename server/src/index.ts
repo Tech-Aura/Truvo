@@ -378,13 +378,26 @@ app.get("/health", (req, res) => {
  * When called with valid payment proof, creates the escrowed task.
  */
 app.post("/api/tasks", requireMppOrX402, async (req, res) => {
+  const reqId = crypto.randomUUID().slice(0, 8);
+  console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "info", component: "server", stage: "task.create_request_received", request_id: reqId, method: req.method, url: req.url }));
+
   try {
     const paymentPayload: PaymentPayload = (req as any).paymentPayload;
+    const mppVerified = (req as any).mppVerified as boolean | undefined;
     
-    // Verify the payment
-    const isValid = await verifyPayment(paymentPayload);
+    if (mppVerified) {
+      console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "info", component: "server", stage: "server.mpp_session_verified", request_id: reqId }));
+    }
+
+    // Verify the payment (skip if MPP already verified)
+    let paymentVerified = mppVerified || false;
+    if (!paymentVerified) {
+      paymentVerified = await verifyPayment(paymentPayload);
+    }
     
-    if (!isValid) {
+    if (!paymentVerified) {
+      console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "error", component: "server", stage: "server.payment_verification_failed", request_id: reqId }));
+
       // Payment verification failed - return settlement response
       const settlementResponse: SettlementResponse = {
         success: false,
@@ -403,6 +416,8 @@ app.post("/api/tasks", requireMppOrX402, async (req, res) => {
       return;
     }
     
+    console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "info", component: "server", stage: "server.payment_verified", request_id: reqId, source: mppVerified ? "mpp-session" : "x402" }));
+
     // Payment verified - create the task
     const { worker, amount, deadline } = req.body;
     
@@ -418,6 +433,8 @@ app.post("/api/tasks", requireMppOrX402, async (req, res) => {
     const taskId = Array.from(crypto.getRandomValues(new Uint8Array(32)))
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
+
+    console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "info", component: "server", stage: "escrow.creation_initiated", correlation_id: taskId, payer: paymentPayload?.payload?.sourceAccount, worker, amount, deadline }));
     
     // Create the task in the escrow contract
     const result = await createTask(
@@ -429,6 +446,8 @@ app.post("/api/tasks", requireMppOrX402, async (req, res) => {
     );
     
     if (result.success) {
+      console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "info", component: "server", stage: "escrow.created", correlation_id: taskId, txHash: result.txHash }));
+
       // Success - return the created task
       const settlementResponse: SettlementResponse = {
         success: true,
@@ -449,6 +468,8 @@ app.post("/api/tasks", requireMppOrX402, async (req, res) => {
         message: "Task created successfully"
       });
     } else {
+      console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "error", component: "server", stage: "escrow.creation_failed", correlation_id: taskId, error: result.error }));
+
       // Task creation failed
       const settlementResponse: SettlementResponse = {
         success: false,
@@ -466,7 +487,7 @@ app.post("/api/tasks", requireMppOrX402, async (req, res) => {
       });
     }
   } catch (error) {
-    console.error("Error creating task:", error);
+    console.error(JSON.stringify({ timestamp: new Date().toISOString(), level: "error", component: "server", stage: "server.task_creation_error", request_id: reqId, error: error instanceof Error ? error.message : String(error) }));
     res.status(500).json({
       error: "Internal server error",
       message: "Failed to process task creation"
