@@ -60,4 +60,15 @@ export {
   TruvoAnchorApiError,
 } from "./anchor";
 
-export const SDK_VERSION = "0.2.0";
+export {
+  X402Client,
+  createX402Client,
+  is402Response,
+  parsePaymentRequired,
+  type X402ClientConfig,
+  type PaymentRequired,
+  type PaymentPayload,
+  type SettlementResponse,
+} from "./x402";
+
+export const SDK_VERSION = "0.3.0";
