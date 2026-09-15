@@ -5,10 +5,10 @@ TypeScript client for interacting with the Truvo escrow smart contract on Stella
 ## Installation
 
 ```bash
-npm install @stellar/stellar-sdk
+npm install @stellar/stellar-sdk @stellar/mpp mppx
 ```
 
-The SDK depends on `@stellar/stellar-sdk` v12+. No other dependencies are required.
+The SDK depends on `@stellar/stellar-sdk` v15+, `@stellar/mpp` v0.7+, and `mppx` v0.6+.
 
 ## Environment Setup
 

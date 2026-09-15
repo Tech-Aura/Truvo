@@ -9,20 +9,7 @@
  * on-chain storage keyed by the connected requester's address.
  */
 
-import { TaskStatus } from "../../types/task";
-
-export interface EscrowTask {
-  task_id: string;
-  payer: string;
-  worker: string;
-  /** Escrowed amount (decimal string on-chain; XLM here for display). */
-  amount: string;
-  /** Ledger timestamp after which the task can be refunded. */
-  deadline: number;
-  status: TaskStatus;
-  /** 32-byte hex proof hash (empty until the worker confirms). */
-  proof_hash: string;
-}
+import { EscrowTask, TaskStatus } from "../../types/task";
 
 /** Deterministic mock rows — realistic values, not random, for stable UI. */
 export const MOCK_TASKS: EscrowTask[] = [

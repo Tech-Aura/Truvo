@@ -22,7 +22,7 @@
 
 import {
   Keypair,
-  SorobanRpc,
+  rpc as SorobanRpc,
   Networks,
 } from "@stellar/stellar-sdk";
 import { TruvoClient, AnchorClient, TaskStatus } from "../src";

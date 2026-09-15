@@ -1,10 +1,15 @@
-# Truvo x402 Payment Server
+# Truvo Payment Server
 
-This server implements the server side of the x402 payment flow for Truvo's task creation endpoint.
+This server implements the payment gateway for Truvo's task creation endpoint, supporting both x402 per-call payments and MPP session (channel) payments.
 
 ## Overview
 
-The x402 protocol enables programmatic, per-request payments over HTTP. When a client calls a protected endpoint without payment, the server responds with HTTP 402 Payment Required plus the payment details needed to proceed.
+The server supports two payment modes:
+
+- **x402 (per-call)**: Each request triggers an individual on-chain payment. Simple and suitable for one-off tasks.
+- **MPP Session (channel)**: Batch payments via off-chain commitment signing. The agent deposits once and signs cumulative commitments — no per-payment on-chain transaction. Ideal for creating many tasks in quick succession.
+
+When a client calls the protected endpoint without payment, the server responds with HTTP 402 Payment Required plus the payment details needed to proceed.
 
 ## x402 Protocol (V2)
 
