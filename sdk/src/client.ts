@@ -8,7 +8,7 @@
 import {
   Contract,
   Keypair,
-  SorobanRpc,
+  rpc as SorobanRpc,
   TransactionBuilder,
   xdr,
   Address,
@@ -21,8 +21,9 @@ import {
   TruvoContractError,
 } from "./errors";
 import { retryWithBackoff, DEFAULT_MAX_RETRIES } from "./retry";
+import { createLogger, Stages, type TruvoLogger } from "./logger";
 
-type ApiGetTxStatus = typeof SorobanRpc.Api.GetTransactionStatus;
+type ApiGetTxStatus = SorobanRpc.Api.GetTransactionStatus;
 type ApiFailedTx = SorobanRpc.Api.GetFailedTransactionResponse;
 
 // ============================================================================
@@ -273,6 +274,7 @@ export class TruvoClient {
   private readonly networkPassphrase: string;
   private readonly keypair: Keypair;
   private readonly maxRetries: number;
+  readonly log: TruvoLogger;
 
   constructor(config: TruvoClientConfig) {
     this.server = new SorobanRpc.Server(config.rpcUrl);
@@ -280,6 +282,7 @@ export class TruvoClient {
     this.networkPassphrase = config.networkPassphrase;
     this.keypair = Keypair.fromSecret(config.secretKey);
     this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.log = createLogger("sdk.client");
   }
 
   /** The public key (G…) of the configured signing account. */
@@ -303,6 +306,14 @@ export class TruvoClient {
    *   or a descriptive error string on failure.
    */
   async createEscrow(input: CreateEscrowInput): Promise<TruvoResult> {
+    const log = this.log.child(input.taskId);
+    log.info(Stages.ESCROW_CREATION_INITIATED, {
+      payer: input.payer,
+      worker: input.worker,
+      amount: input.amount,
+      deadline: input.deadline,
+    });
+
     const contract = new Contract(this.contractId);
 
     // Network calls that may fail transiently — wrapped with retry.
@@ -342,6 +353,7 @@ export class TruvoClient {
 
     if (sendResult.status === "ERROR") {
       const errMsg = sendResult.errorResult?.toString() ?? "Transaction submission error";
+      log.error(Stages.ESCROW_CREATION_FAILED, { error: errMsg, txHash: sendResult.hash });
       throw new TruvoContractError(
         `createEscrow failed: ${errMsg}`,
         errMsg,
@@ -349,11 +361,17 @@ export class TruvoClient {
       );
     }
 
+    log.info("escrow.tx_submitted", { txHash: sendResult.hash });
     await this.waitForTransaction(sendResult.hash);
 
     // Read the newly created task from contract storage so we return
     // the authoritative on-chain state.
     const task = await this.getTask(input.taskId);
+
+    log.info(Stages.ESCROW_CREATED, {
+      status: task.status,
+      onChainAmount: task.amount,
+    });
 
     return { task, txHash: sendResult.hash };
   }
@@ -377,6 +395,11 @@ export class TruvoClient {
    * @returns A typed result containing the updated {@link Task} on success.
    */
   async confirmTask(input: ConfirmTaskInput): Promise<TruvoResult> {
+    const log = this.log.child(input.taskId);
+    log.info(Stages.WORKER_CONFIRMATION_INITIATED, {
+      proofHash: input.proofHash,
+    });
+
     const contract = new Contract(this.contractId);
 
     const sourceAccount = await retryWithBackoff(
@@ -412,6 +435,7 @@ export class TruvoClient {
 
     if (sendResult.status === "ERROR") {
       const errMsg = sendResult.errorResult?.toString() ?? "Transaction submission error";
+      log.error(Stages.WORKER_CONFIRMATION_FAILED, { error: errMsg, txHash: sendResult.hash });
       throw new TruvoContractError(
         `confirmTask failed: ${errMsg}`,
         errMsg,
@@ -419,9 +443,15 @@ export class TruvoClient {
       );
     }
 
+    log.info("worker.tx_submitted", { txHash: sendResult.hash });
     await this.waitForTransaction(sendResult.hash);
 
     const task = await this.getTask(input.taskId);
+
+    log.info(Stages.WORKER_CONFIRMED, {
+      status: task.status,
+      proofHash: input.proofHash,
+    });
 
     return { task, txHash: sendResult.hash };
   }
@@ -446,6 +476,9 @@ export class TruvoClient {
    *   event-derived `worker` and `amount` on success.
    */
   async releaseFunds(input: ReleaseFundsInput): Promise<ReleaseFundsResult> {
+    const log = this.log.child(input.taskId);
+    log.info(Stages.RELEASE_INITIATED, {});
+
     const contract = new Contract(this.contractId);
 
     const sourceAccount = await retryWithBackoff(
@@ -477,6 +510,7 @@ export class TruvoClient {
 
     if (sendResult.status === "ERROR") {
       const errMsg = sendResult.errorResult?.toString() ?? "Transaction submission error";
+      log.error(Stages.RELEASE_FAILED, { error: errMsg, txHash: sendResult.hash });
       throw new TruvoContractError(
         `releaseFunds failed: ${errMsg}`,
         errMsg,
@@ -484,6 +518,7 @@ export class TruvoClient {
       );
     }
 
+    log.info("release.tx_submitted", { txHash: sendResult.hash });
     const meta = await this.waitForTransactionGetMeta(sendResult.hash);
     const task = await this.getTask(input.taskId);
 
@@ -500,6 +535,11 @@ export class TruvoClient {
         amount = scValToI128(eventVec[2]);
       }
     }
+
+    log.info(Stages.RELEASE_COMPLETED, {
+      worker,
+      amount,
+    });
 
     return { task, txHash: sendResult.hash, worker, amount };
   }
@@ -525,6 +565,9 @@ export class TruvoClient {
   async refundExpired(
     input: RefundExpiredInput,
   ): Promise<RefundExpiredResult> {
+    const log = this.log.child(input.taskId);
+    log.info(Stages.REFUND_INITIATED, {});
+
     const contract = new Contract(this.contractId);
 
     const sourceAccount = await retryWithBackoff(
@@ -556,6 +599,7 @@ export class TruvoClient {
 
     if (sendResult.status === "ERROR") {
       const errMsg = sendResult.errorResult?.toString() ?? "Transaction submission error";
+      log.error(Stages.REFUND_FAILED, { error: errMsg, txHash: sendResult.hash });
       throw new TruvoContractError(
         `refundExpired failed: ${errMsg}`,
         errMsg,
@@ -563,6 +607,7 @@ export class TruvoClient {
       );
     }
 
+    log.info("refund.tx_submitted", { txHash: sendResult.hash });
     const meta = await this.waitForTransactionGetMeta(sendResult.hash);
     const task = await this.getTask(input.taskId);
 
@@ -579,6 +624,8 @@ export class TruvoClient {
         amount = scValToI128(eventVec[2]);
       }
     }
+
+    log.info(Stages.REFUND_COMPLETED, { payer, amount });
 
     return { task, txHash: sendResult.hash, payer, amount };
   }
@@ -810,7 +857,7 @@ export class TruvoClient {
       () => this.server.getContractData(
         this.contractId,
         key,
-        SorobanRpc.Durability.Persistent,
+        (SorobanRpc as any).Durability.Persistent,
       ),
       "getContractData",
       this.maxRetries,

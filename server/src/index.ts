@@ -14,11 +14,13 @@ import {
   TransactionBuilder, 
   Operation, 
   Asset,
-  SorobanRpc,
+  rpc as SorobanRpc,
   Contract,
   Address,
   xdr
 } from "@stellar/stellar-sdk";
+import { Mppx as MppxServer, Store } from "mppx/server";
+import { stellar } from "@stellar/mpp/channel/server";
 
 // ============================================================================
 // Configuration
@@ -33,6 +35,12 @@ const TASK_CREATION_FEE_DISPLAY = "0.1 XLM"; // Display amount
 
 // Payment recipient (Truvo treasury)
 const PAYMENT_RECIPIENT = process.env.PAYMENT_RECIPIENT || "GCOLRACTORADDRESS123456789012345678901234567890";
+
+// MPP Session (Channel) configuration
+const MPP_CHANNEL_CONTRACT = process.env.MPP_CHANNEL_CONTRACT; // C... (56 chars)
+const MPP_COMMITMENT_PUBKEY = process.env.MPP_COMMITMENT_PUBKEY; // 64-char hex ed25519 public key
+const MPP_SECRET_KEY = process.env.MPP_SECRET_KEY; // Shared secret for MPP credential verification
+const MPP_PER_REQUEST_FEE = process.env.MPP_PER_REQUEST_FEE || "1000000"; // 0.1 XLM in stroops
 
 // ============================================================================
 // x402 Types (based on x402 V2 specification)
@@ -185,6 +193,37 @@ async function createTask(
 }
 
 // ============================================================================
+// MPP Channel Server (Session)
+// ============================================================================
+
+let mppChannel: any = null;
+
+if (MPP_CHANNEL_CONTRACT && MPP_COMMITMENT_PUBKEY && MPP_SECRET_KEY) {
+  // Convert hex commitment pubkey to Stellar G... address
+  const commitmentPublicKeyG = "G" + Buffer.from(MPP_COMMITMENT_PUBKEY, "hex").toString("base64").replace(/\+/g, "-").replace(/\//g, "").replace(/=+$/, "");
+
+  mppChannel = MppxServer.create({
+    secretKey: MPP_SECRET_KEY,
+    methods: [
+      stellar.channel({
+        channel: MPP_CHANNEL_CONTRACT,
+        commitmentKey: commitmentPublicKeyG,
+        store: Store.memory(),
+        network: "stellar:testnet",
+      }),
+    ],
+  });
+
+  console.log("✅ MPP Session (Channel) server initialized");
+  console.log(`   Channel: ${MPP_CHANNEL_CONTRACT}`);
+  console.log(`   Commitment key: ${commitmentPublicKeyG}`);
+  console.log(`   Per-request fee: ${MPP_PER_REQUEST_FEE} stroops`);
+} else {
+  console.log("⚠️  MPP Session (Channel) not configured — x402 only");
+  console.log("   Set MPP_CHANNEL_CONTRACT, MPP_COMMITMENT_PUBKEY, and MPP_SECRET_KEY");
+}
+
+// ============================================================================
 // Express Server
 // ============================================================================
 
@@ -228,8 +267,9 @@ function requirePayment(
   
   // Payment signature provided - verify it
   try {
+    const headerValue = Array.isArray(paymentSignatureHeader) ? paymentSignatureHeader[0] : paymentSignatureHeader;
     const paymentPayload: PaymentPayload = JSON.parse(
-      Buffer.from(paymentSignatureHeader, "base64").toString()
+      Buffer.from(headerValue, "base64").toString()
     );
     
     // Store the parsed payment payload for later use
@@ -244,6 +284,76 @@ function requirePayment(
 }
 
 // ============================================================================
+// MPP Session (Channel) Middleware
+// ============================================================================
+
+/**
+ * Middleware that handles MPP channel (session) payments.
+ * If MPP is configured, intercepts 402 challenges and handles them
+ * via the MPP channel server. Falls back to x402 if MPP is not configured.
+ */
+async function requireMppOrX402(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  // If MPP channel server is not configured, fall back to x402
+  if (!mppChannel) {
+    return requirePayment(req, res, next);
+  }
+
+  // Check if the request includes an MPP credential
+  const mppCredential = req.headers["x-mpp-credential"];
+
+  if (mppCredential) {
+    // Handle MPP channel payment
+    try {
+      const headers = new Headers();
+      for (const [key, value] of Object.entries(req.headers)) {
+        if (value == null) continue;
+        if (Array.isArray(value)) {
+          for (const entry of value) {
+            headers.append(key, entry);
+          }
+        } else {
+          headers.set(key, value);
+        }
+      }
+
+      const webReq = new Request(`http://localhost:${PORT}${req.url}`, {
+        method: req.method,
+        headers,
+        body: req.method !== "GET" && req.method !== "HEAD"
+          ? JSON.stringify(req.body)
+          : undefined,
+      });
+
+      const result = await mppChannel.channel({
+        amount: (parseInt(MPP_PER_REQUEST_FEE) / 10000000).toString(), // Convert stroops to XLM
+        description: "Truvo task creation fee",
+      })(webReq);
+
+      if (result.status === 402) {
+        const challenge = result.challenge;
+        challenge.headers.forEach((value: string, key: string) => res.setHeader(key, value));
+        return res.status(402).send(await challenge.text());
+      }
+
+      // MPP payment verified — proceed to task creation
+      (req as any).mppVerified = true;
+      (req as any).mppFunder = mppCredential;
+      next();
+    } catch (error) {
+      console.error("MPP channel verification failed:", error);
+      return requirePayment(req, res, next);
+    }
+  } else {
+    // No MPP credential — fall back to x402
+    return requirePayment(req, res, next);
+  }
+}
+
+// ============================================================================
 // Routes
 // ============================================================================
 
@@ -254,7 +364,8 @@ app.get("/health", (req, res) => {
   res.json({ 
     status: "ok", 
     service: "Truvo x402 Payment Server",
-    version: "0.1.0"
+    version: "0.1.0",
+    mppEnabled: !!mppChannel
   });
 });
 
@@ -266,14 +377,27 @@ app.get("/health", (req, res) => {
  * 
  * When called with valid payment proof, creates the escrowed task.
  */
-app.post("/api/tasks", requirePayment, async (req, res) => {
+app.post("/api/tasks", requireMppOrX402, async (req, res) => {
+  const reqId = crypto.randomUUID().slice(0, 8);
+  console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "info", component: "server", stage: "task.create_request_received", request_id: reqId, method: req.method, url: req.url }));
+
   try {
     const paymentPayload: PaymentPayload = (req as any).paymentPayload;
+    const mppVerified = (req as any).mppVerified as boolean | undefined;
     
-    // Verify the payment
-    const isValid = await verifyPayment(paymentPayload);
+    if (mppVerified) {
+      console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "info", component: "server", stage: "server.mpp_session_verified", request_id: reqId }));
+    }
+
+    // Verify the payment (skip if MPP already verified)
+    let paymentVerified = mppVerified || false;
+    if (!paymentVerified) {
+      paymentVerified = await verifyPayment(paymentPayload);
+    }
     
-    if (!isValid) {
+    if (!paymentVerified) {
+      console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "error", component: "server", stage: "server.payment_verification_failed", request_id: reqId }));
+
       // Payment verification failed - return settlement response
       const settlementResponse: SettlementResponse = {
         success: false,
@@ -292,6 +416,8 @@ app.post("/api/tasks", requirePayment, async (req, res) => {
       return;
     }
     
+    console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "info", component: "server", stage: "server.payment_verified", request_id: reqId, source: mppVerified ? "mpp-session" : "x402" }));
+
     // Payment verified - create the task
     const { worker, amount, deadline } = req.body;
     
@@ -307,6 +433,8 @@ app.post("/api/tasks", requirePayment, async (req, res) => {
     const taskId = Array.from(crypto.getRandomValues(new Uint8Array(32)))
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
+
+    console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "info", component: "server", stage: "escrow.creation_initiated", correlation_id: taskId, payer: paymentPayload?.payload?.sourceAccount, worker, amount, deadline }));
     
     // Create the task in the escrow contract
     const result = await createTask(
@@ -318,6 +446,8 @@ app.post("/api/tasks", requirePayment, async (req, res) => {
     );
     
     if (result.success) {
+      console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "info", component: "server", stage: "escrow.created", correlation_id: taskId, txHash: result.txHash }));
+
       // Success - return the created task
       const settlementResponse: SettlementResponse = {
         success: true,
@@ -338,6 +468,8 @@ app.post("/api/tasks", requirePayment, async (req, res) => {
         message: "Task created successfully"
       });
     } else {
+      console.log(JSON.stringify({ timestamp: new Date().toISOString(), level: "error", component: "server", stage: "escrow.creation_failed", correlation_id: taskId, error: result.error }));
+
       // Task creation failed
       const settlementResponse: SettlementResponse = {
         success: false,
@@ -355,7 +487,7 @@ app.post("/api/tasks", requirePayment, async (req, res) => {
       });
     }
   } catch (error) {
-    console.error("Error creating task:", error);
+    console.error(JSON.stringify({ timestamp: new Date().toISOString(), level: "error", component: "server", stage: "server.task_creation_error", request_id: reqId, error: error instanceof Error ? error.message : String(error) }));
     res.status(500).json({
       error: "Internal server error",
       message: "Failed to process task creation"

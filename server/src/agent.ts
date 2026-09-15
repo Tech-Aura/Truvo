@@ -3,26 +3,41 @@
  *
  * A standalone TypeScript script that demonstrates fully autonomous operation:
  * 1. Monitors a queue of pending tasks (from a local JSON file)
- * 2. For each task, uses the x402 flow to pay for and create an escrowed task
- * 3. Operates without any human triggering it
+ * 2. For batches of tasks, uses MPP session (channel) payments for efficiency
+ * 3. For single tasks, falls back to per-call x402 payments
+ * 4. Operates without any human triggering it
  *
  * This proves the agent can discover work, pay autonomously, and create
- * escrows end to end.
+ * escrows end to end — with session payments for batch efficiency.
  *
  * Usage:
  *   npx tsx src/agent.ts
  *
  * The agent will:
  *   - Read pending tasks from tasks-queue.json
- *   - For each task, call the x402-protected endpoint
- *   - Automatically handle the 402 response and payment flow
+ *   - For batches: use MPP session (channel) payments (off-chain commitments)
+ *   - For one-offs: use per-call x402 payments (on-chain per transaction)
  *   - Update the queue with results
  */
 
 import { Keypair, Networks } from "@stellar/stellar-sdk";
 import { X402Client } from "../../sdk/src/x402";
+import { MppSessionClient } from "../../sdk/src/mpp-session";
 import * as fs from "fs";
 import * as path from "path";
+
+// Structured logger for the agent component
+function log(level: string, stage: string, taskId?: string, meta?: Record<string, unknown>) {
+  const entry: Record<string, unknown> = {
+    timestamp: new Date().toISOString(),
+    level,
+    component: "agent",
+    stage,
+    correlation_id: taskId,
+    ...meta,
+  };
+  process.stderr.write(JSON.stringify(entry) + "\n");
+}
 
 // ============================================================================
 // Configuration
@@ -32,10 +47,17 @@ const SERVER_URL = process.env.SERVER_URL || "http://localhost:3001";
 const QUEUE_FILE = process.env.QUEUE_FILE || "tasks-queue.json";
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || "5000", 10);
 
-// For demo purposes, use a testnet account
-// In production, this would be a real funded account
+// Batch threshold: if this many or more tasks are pending, use MPP session
+const BATCH_THRESHOLD = parseInt(process.env.BATCH_THRESHOLD || "2", 10);
+
+// For demo purposes, use testnet accounts
+// In production, these would be real funded accounts
 const TESTNET_SECRET_KEY = process.env.TESTNET_SECRET_KEY || 
   "SAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+
+// MPP session commitment key (ed25519 secret for signing off-chain commitments)
+// This is different from the payment key — it signs cumulative commitments
+const MPP_COMMITMENT_SECRET = process.env.MPP_COMMITMENT_SECRET || "";
 
 // ============================================================================
 // Types
@@ -49,6 +71,7 @@ interface PendingTask {
   status: "pending" | "processing" | "completed" | "failed";
   error?: string;
   txHash?: string;
+  paymentMethod?: "x402" | "mpp-session";
   createdAt: string;
   updatedAt: string;
 }
@@ -123,45 +146,59 @@ function addTaskToQueue(
 // ============================================================================
 
 /**
- * Process a single pending task using the x402 payment flow
+ * Process a single task using x402 payment (per-call)
  */
-async function processTask(
-  client: X402Client,
+async function processTaskWithX402(
+  x402Client: X402Client,
   task: PendingTask
 ): Promise<PendingTask> {
-  console.log(`\n🔄 Processing task ${task.id}...`);
-  console.log(`   Worker: ${task.worker}`);
-  console.log(`   Amount: ${task.amount} XLM`);
-  console.log(`   Deadline: ${new Date(task.deadline * 1000).toISOString()}`);
+  log("info", "agent.task_processing", task.id, {
+    worker: task.worker,
+    amount: task.amount,
+    deadline: task.deadline,
+    paymentMethod: "x402",
+  });
 
-  // Mark as processing
   task.status = "processing";
+  task.paymentMethod = "x402";
   task.updatedAt = new Date().toISOString();
 
   try {
-    // Use the x402 client to create the task
-    const result = await client.createTaskWithPayment(SERVER_URL, {
+    log("info", "x402.request_initiated", task.id, {
+      url: `${SERVER_URL}/api/tasks`,
+      method: "POST",
+    });
+
+    const result = await x402Client.createTaskWithPayment(SERVER_URL, {
       worker: task.worker,
       amount: task.amount,
       deadline: task.deadline,
-    });
+    }, task.id);
 
     if (result.success) {
-      console.log(`✅ Task ${task.id} created successfully!`);
-      console.log(`   Task ID: ${result.taskId}`);
-      console.log(`   TX Hash: ${result.txHash}`);
+      log("info", "x402.payment_settled", task.id, {
+        taskId: result.taskId,
+        txHash: result.txHash,
+      });
+
+      log("info", "escrow.created", task.id, {
+        onChainTaskId: result.taskId,
+        txHash: result.txHash,
+      });
 
       task.status = "completed";
       task.txHash = result.txHash;
     } else {
-      console.error(`❌ Task ${task.id} failed: ${result.error}`);
+      log("error", "x402.payment_failed", task.id, {
+        error: result.error,
+      });
 
       task.status = "failed";
       task.error = result.error;
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error(`❌ Task ${task.id} error: ${errorMessage}`);
+    log("error", "x402.payment_failed", task.id, { error: errorMessage });
 
     task.status = "failed";
     task.error = errorMessage;
@@ -172,9 +209,98 @@ async function processTask(
 }
 
 /**
+ * Process a batch of tasks using MPP session (channel) payment
+ */
+async function processBatchWithMppSession(
+  mppClient: MppSessionClient,
+  tasks: PendingTask[]
+): Promise<PendingTask[]> {
+  log("info", "agent.batch_started", undefined, {
+    taskCount: tasks.length,
+    funder: mppClient.publicKey,
+    paymentMethod: "mpp-session",
+  });
+
+  // Mark all as processing
+  for (const task of tasks) {
+    task.status = "processing";
+    task.paymentMethod = "mpp-session";
+    task.updatedAt = new Date().toISOString();
+  }
+
+  try {
+    const batchResults = await mppClient.batchCreateTasks(
+      SERVER_URL,
+      tasks.map((t) => ({
+        worker: t.worker,
+        amount: t.amount,
+        deadline: t.deadline,
+      }))
+    );
+
+    // Map results back to tasks
+    for (let i = 0; i < tasks.length; i++) {
+      const task = tasks[i];
+      const result = batchResults[i];
+
+      if (result.success) {
+        log("info", "mpp.payment_served", task.id, {
+          taskId: result.taskId,
+          txHash: result.txHash,
+          cumulativeAmount: result.cumulativeAmount,
+        });
+
+        log("info", "escrow.created", task.id, {
+          onChainTaskId: result.taskId,
+          txHash: result.txHash,
+        });
+
+        task.status = "completed";
+        task.txHash = result.txHash;
+      } else {
+        log("error", "mpp.payment_failed", task.id, {
+          error: result.error,
+        });
+
+        task.status = "failed";
+        task.error = result.error;
+      }
+
+      task.updatedAt = new Date().toISOString();
+    }
+
+    // Log session summary
+    const summary = mppClient.getSummary();
+    log("info", "agent.batch_completed", undefined, {
+      requestCount: summary.requestCount,
+      cumulativeAmount: summary.cumulativeAmount,
+      channel: summary.channel,
+    });
+
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    log("error", "agent.batch_error", undefined, { error: errorMessage });
+
+    // Mark all remaining tasks as failed
+    for (const task of tasks) {
+      if (task.status === "processing") {
+        task.status = "failed";
+        task.error = errorMessage;
+        task.updatedAt = new Date().toISOString();
+      }
+    }
+  }
+
+  return tasks;
+}
+
+/**
  * Process all pending tasks in the queue
  */
-async function processPendingTasks(client: X402Client): Promise<number> {
+async function processPendingTasks(
+  x402Client: X402Client,
+  mppClient: MppSessionClient | null
+): Promise<number> {
   const queue = loadQueue();
   const pendingTasks = queue.tasks.filter(t => t.status === "pending");
 
@@ -186,12 +312,25 @@ async function processPendingTasks(client: X402Client): Promise<number> {
   console.log(`\n📋 Found ${pendingTasks.length} pending task(s) to process.`);
 
   let processedCount = 0;
-  for (const task of pendingTasks) {
-    await processTask(client, task);
-    processedCount++;
 
-    // Small delay between tasks to avoid rate limiting
-    await new Promise(resolve => setTimeout(resolve, 1000));
+  // Decide payment strategy: batch vs individual
+  if (mppClient && pendingTasks.length >= BATCH_THRESHOLD) {
+    // Use MPP session for batch processing
+    console.log(`   → Using MPP session for batch (${pendingTasks.length} >= ${BATCH_THRESHOLD} threshold)`);
+
+    await processBatchWithMppSession(mppClient, pendingTasks);
+    processedCount = pendingTasks.length;
+  } else {
+    // Use per-call x402 for individual tasks
+    console.log(`   → Using per-call x402 ${mppClient ? `(below batch threshold of ${BATCH_THRESHOLD})` : "(MPP not configured)"}`);
+
+    for (const task of pendingTasks) {
+      await processTaskWithX402(x402Client, task);
+      processedCount++;
+
+      // Small delay between tasks to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
   }
 
   // Update the queue
@@ -248,20 +387,21 @@ async function main() {
   console.log(`Server URL: ${SERVER_URL}`);
   console.log(`Queue File: ${QUEUE_FILE}`);
   console.log(`Poll Interval: ${POLL_INTERVAL_MS}ms`);
+  console.log(`Batch Threshold: ${BATCH_THRESHOLD} tasks`);
   console.log("");
 
   // Create sample tasks for demonstration
   createSampleTasks();
 
-  // Initialize the x402 client
-  let client: X402Client;
+  // Initialize the x402 client (always available as fallback)
+  let x402Client: X402Client;
   try {
-    client = new X402Client({
+    x402Client = new X402Client({
       secretKey: TESTNET_SECRET_KEY,
       networkPassphrase: Networks.TESTNET,
       maxRetries: 3,
     });
-    console.log(`✅ Agent initialized with public key: ${client.publicKey}`);
+    console.log(`✅ x402 client initialized with public key: ${x402Client.publicKey}`);
   } catch (error) {
     console.error("❌ Failed to initialize x402 client:", error);
     console.log("\n💡 To run this agent, set the TESTNET_SECRET_KEY environment variable:");
@@ -269,6 +409,37 @@ async function main() {
     console.log("\n   You can generate a testnet account with:");
     console.log("   curl https://friendbot.stellar.org/?addr=<YOUR_PUBLIC_KEY>");
     return;
+  }
+
+  // Initialize MPP session client (optional, for batch efficiency)
+  let mppClient: MppSessionClient | null = null;
+  if (MPP_COMMITMENT_SECRET) {
+    try {
+      mppClient = new MppSessionClient({
+        commitmentKey: Keypair.fromSecret(MPP_COMMITMENT_SECRET),
+        networkPassphrase: Networks.TESTNET,
+        onProgress: (event) => {
+          switch (event.type) {
+            case "session_opened":
+              console.log(`   📡 MPP session opened with funder: ${event.funder}`);
+              break;
+            case "commitment_signed":
+              console.log(`   ✍️  Commitment signed (cumulative: ${event.cumulativeAmount})`);
+              break;
+            case "payment_served":
+              console.log(`   💰 Payment served via channel: ${event.channel}`);
+              break;
+          }
+        },
+      });
+      console.log(`✅ MPP session client initialized with commitment key: ${mppClient.publicKey}`);
+    } catch (error) {
+      console.warn("⚠️  Failed to initialize MPP session client:", error);
+      console.log("   Falling back to per-call x402 for all tasks.");
+    }
+  } else {
+    console.log("ℹ️  MPP session not configured (MPP_COMMITMENT_SECRET not set)");
+    console.log("   Using per-call x402 for all tasks.");
   }
 
   console.log("\n🚀 Starting agent loop...");
@@ -281,7 +452,7 @@ async function main() {
     console.log(`\n🔄 Iteration ${iteration} - ${new Date().toISOString()}`);
 
     try {
-      const processedCount = await processPendingTasks(client);
+      const processedCount = await processPendingTasks(x402Client, mppClient);
       
       if (processedCount > 0) {
         console.log(`\n✅ Processed ${processedCount} task(s) in this iteration.`);
