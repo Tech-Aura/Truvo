@@ -22,7 +22,7 @@
 
 import {
   Keypair,
-  SorobanRpc,
+  rpc as SorobanRpc,
   TransactionBuilder,
   Contract,
   Address,

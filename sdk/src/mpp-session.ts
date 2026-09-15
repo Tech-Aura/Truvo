@@ -168,7 +168,9 @@ export class MppSessionClient {
   async installFetchPolyfill(): Promise<void> {
     // Dynamic import to keep the SDK bundle small for consumers who
     // only use x402 charge mode.
+    // @ts-ignore — dynamic import of MPP subpath exports; resolved at runtime
     const { Mppx } = await import("mppx/client");
+    // @ts-ignore — dynamic import of MPP subpath exports; resolved at runtime
     const { stellar } = await import("@stellar/mpp/channel/client");
 
     Mppx.create({

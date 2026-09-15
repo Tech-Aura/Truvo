@@ -142,10 +142,6 @@ async function verifyPayment(paymentPayload: PaymentPayload): Promise<boolean> {
     // 4. Submit the transaction via a facilitator
     
     // For demo purposes, we'll accept valid-looking payloads
-    console.log(`Verifying payment from ${paymentPayload.payload.sourceAccount}`);
-    console.log(`Amount: ${paymentPayload.payload.amount} stroops`);
-    console.log(`Destination: ${paymentPayload.payload.destination}`);
-    
     // Simple validation
     if (!txXdr || !paymentPayload.payload.sourceAccount) {
       return false;
@@ -153,8 +149,7 @@ async function verifyPayment(paymentPayload: PaymentPayload): Promise<boolean> {
     
     // In production, verify the transaction is valid and hasn't been submitted
     return true;
-  } catch (error) {
-    console.error("Payment verification failed:", error);
+  } catch {
     return false;
   }
 }
@@ -172,11 +167,6 @@ async function createTask(
   try {
     // In production, this would call the Truvo escrow contract
     // For demo purposes, we'll simulate the task creation
-    
-    console.log(`Creating task ${taskId}`);
-    console.log(`Payer: ${payer}, Worker: ${worker}`);
-    console.log(`Amount: ${amount}, Deadline: ${deadline}`);
-    
     // Simulate successful task creation
     return {
       success: true,
