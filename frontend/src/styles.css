@@ -286,6 +286,46 @@
   background-color: rgba(247, 118, 142, 0.12);
 }
 
+/* Admin / Arbitrator View */
+.admin-unauthorized {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 0.85rem 1.1rem;
+  margin-bottom: 1.25rem;
+  background-color: rgba(247, 118, 142, 0.1);
+  border: 1px solid rgba(247, 118, 142, 0.35);
+  border-radius: 10px;
+  color: #f7768e;
+  font-size: 0.88rem;
+}
+
+.admin-unauthorized p {
+  margin: 0.25rem 0 0;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.btn-resolve-worker {
+  background-color: rgba(158, 206, 106, 0.15);
+  color: #9ece6a;
+  border: 1px solid #9ece6a;
+}
+
+.btn-resolve-worker:hover:not(:disabled) {
+  background-color: rgba(158, 206, 106, 0.25);
+}
+
+.btn-resolve-payer {
+  background-color: rgba(187, 154, 247, 0.15);
+  color: #bb9af7;
+  border: 1px solid #bb9af7;
+}
+
+.btn-resolve-payer:hover:not(:disabled) {
+  background-color: rgba(187, 154, 247, 0.25);
+}
+
 /* Worker View */
 .worker-task-list {
   margin-top: 1.5rem;
